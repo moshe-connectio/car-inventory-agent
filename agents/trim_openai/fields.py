@@ -8,8 +8,10 @@ Field names match the Zoho API exactly (note: Battery_kwh / Charging_kw are lowe
 """
 
 # ── Approved sources & price bounds (shared with fetcher + validator) ───────────
+# Upper bound covers Israeli luxury/exotic new cars (Ferrari, Lamborghini, Rolls,
+# high-end EVs) which routinely exceed ₪2-3M; still guards against USD/EUR or garbage.
 MIN_PRICE = 55_000
-MAX_PRICE = 1_500_000
+MAX_PRICE = 8_000_000
 APPROVED_SOURCES = ("icar.co.il", "auto.co.il", "gov.il")
 
 

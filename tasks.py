@@ -27,14 +27,38 @@ def _chain_trim_scan(result: dict) -> None:
     mfr_en  = result.get("manufacturer", "")
     mfr_he  = result.get("mfr_he", "")
 
+    def _resolve_model_id(manufacturer_id: str, name_en: str, name_he: str) -> str:
+        """Look up a model's Zoho id by name when create_model didn't return one."""
+        if not manufacturer_id:
+            return ""
+        try:
+            import zoho_client
+            models = zoho_client.get_models(str(manufacturer_id))
+        except Exception as e:
+            log.warning(f"[chain] get_models נכשל בעת השלמת ID: {e}")
+            return ""
+        ne, nh = (name_en or "").strip().upper(), (name_he or "").strip().upper()
+        for m in models:
+            if (m.get("Name") or "").strip().upper() == ne and ne:
+                return str(m.get("id", ""))
+            if (m.get("Car_Model_Name_HE") or "").strip().upper() == nh and nh:
+                return str(m.get("id", ""))
+        return ""
+
     dispatched = []
     for change in changes:
         if change.get("action") not in ("created", "activated"):
             continue
         model_id = change.get("id") or change.get("zoho_id")
         if not model_id:
-            log.warning(f"[chain] trim scan דולג — אין ID לדגם: {change.get('name', '')}")
-            continue
+            # create_model sometimes returns no id — resolve it from Zoho by name
+            # so the trim scan still runs for the new model.
+            model_id = _resolve_model_id(mfr_id, change.get("name", ""), change.get("name_he", ""))
+            if model_id:
+                log.info(f"[chain] ID הושלם מ-Zoho עבור {change.get('name','')}: {model_id}")
+            else:
+                log.warning(f"[chain] trim scan דולג — אין ID לדגם גם אחרי חיפוש: {change.get('name', '')}")
+                continue
         payload = {
             "manufacturer": {"id": mfr_id, "name_en": mfr_en, "name_he": mfr_he},
             "models": [{

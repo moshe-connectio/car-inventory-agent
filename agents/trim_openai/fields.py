@@ -77,7 +77,7 @@ SANITY: dict[str, tuple[float, float]] = {
     "monthly_payment":  (300, 60_000),
     "hp":               (30, 2000),
     "sec":              (1.5, 30),
-    "range_km":         (50, 1200),
+    "range_km":         (10, 1200),   # low end covers PHEV electric-only range (~25 km)
     "top_speed":        (100, 420),
     "screen_inch":      (4, 30),
     "doors":            (2, 6),

@@ -181,7 +181,7 @@ def run(payload) -> dict:
         "manufacturer": mfr_en,
         "models": len(models),
         "created": 0, "updated": 0, "activated": 0,
-        "deactivated": 0, "no_change": 0, "rejected": 0, "errors": 0,
+        "deactivated": 0, "no_change": 0, "rejected": 0, "no_data": 0, "errors": 0,
     }
 
     for model in models:
@@ -196,7 +196,7 @@ def run(payload) -> dict:
 
         log.info(f"")
         log.info(f"  ┌── {model_en}{(' (' + model_he + ')') if model_he else ''}")
-        _snap = {k: stats[k] for k in ("created","updated","activated","deactivated","no_change","rejected","errors")}
+        _snap = {k: stats[k] for k in ("created","updated","activated","deactivated","no_change","rejected","no_data","errors")}
 
         # ── שלוף קיים מ-Zoho ──────────────────────────────
         existing_trims: list[dict] = []
@@ -223,6 +223,12 @@ def run(payload) -> dict:
             stats["errors"] += 1
             continue
 
+        # אין מחירים במקורות המאושרים — דילוג שקט, לא שגיאה (לא ממציאים נתונים)
+        if not ai_trims:
+            log.info(f"  [trim-runner] {model_en}: לא נמצאו מחירים במקורות המאושרים — מדלג")
+            stats["no_data"] += 1
+            continue
+
         # ── שער אימות דטרמיניסטי ────────────────────────────
         # בודק שלמות + תקינות לפני כל כתיבה. רק גרסאות שעברו נכתבות.
         vf          = validate_fetch(ai_trims)
@@ -231,8 +237,8 @@ def run(payload) -> dict:
             stats["rejected"] += len(vf["rejected"])
             log.warning(f"     [validate] {len(vf['rejected'])} גרסאות נדחו ולא ייכתבו")
         if not valid_trims:
-            log.error(f"  [trim-runner] {model_en}: אף גרסה לא עברה אימות — לא משנה דבר בדגם")
-            stats["errors"] += 1
+            # נמצאו גרסאות אך כולן נדחו באימות — כבר נספרו ב-rejected, לא שגיאת מערכת
+            log.warning(f"  [trim-runner] {model_en}: כל הגרסאות נדחו באימות — לא נכתב דבר")
             continue
 
         # נירמול קנוני: חיתוך תחילית יצרן+דגם משמות הגרסאות (גם he וגם en),
@@ -296,7 +302,7 @@ def run(payload) -> dict:
                     stats["no_change"] += 1
 
         _d = lambda k: stats[k] - _snap[k]
-        log.info(f"  └── {model_en}: +{_d('created')} ↑{_d('activated')} ~{_d('updated')} ↓{_d('deactivated')} ={_d('no_change')} ✗{_d('rejected')} !{_d('errors')}")
+        log.info(f"  └── {model_en}: +{_d('created')} ↑{_d('activated')} ~{_d('updated')} ↓{_d('deactivated')} ={_d('no_change')} ✗{_d('rejected')} ∅{_d('no_data')} !{_d('errors')}")
 
         # ── כיבוי גרסאות שלא נמצאו ─────────────────────────
         # ריסון churn: מכבים רק כששליפה "מקיפה" — החזירה לפחות כמה גרסאות
@@ -329,6 +335,6 @@ def run(payload) -> dict:
     log.info(
         f"[trim-runner] {mfr_en}: "
         f"+{stats['created']} ↑{stats['activated']} ~{stats['updated']} "
-        f"↓{stats['deactivated']} ={stats['no_change']} ✗{stats['rejected']} !{stats['errors']}"
+        f"↓{stats['deactivated']} ={stats['no_change']} ✗{stats['rejected']} ∅{stats['no_data']} !{stats['errors']}"
     )
     return stats

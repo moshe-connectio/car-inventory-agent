@@ -269,20 +269,28 @@ def get_trims_ai(
     )
 
     log.info(f"  [trim-ai] fetching: {search_name}")
-    trims = _fetch_all(client, search_name, mfr_he, model_he)
 
+    # ── PRIMARY: icar.co.il JSON API — complete, deterministic trim list + specs ──
+    from ..scrapers import icar_api
+    trims  = icar_api.get_trims(mfr_en, mfr_he, model_en, model_he)
+    source = "icar-api"
+
+    # ── FALLBACK: AI web search (models not on icar / not resolved) ──
     if not trims:
-        log.info(f"  [trim-ai] {search_name}: לא נמצאו מחירים — מדלג")
-        return []
+        log.info(f"  [trim-ai] {search_name}: icar API ריק — עובר ל-AI fallback")
+        trims  = _fetch_all(client, search_name, mfr_he, model_he)
+        source = "ai"
+        if not trims:
+            log.info(f"  [trim-ai] {search_name}: לא נמצאו מחירים — מדלג")
+            return []
+        # repair pass: fill missing specs per trim from the detailed spec pages
+        repaired = 0
+        for t in trims:
+            repaired += _repair_trim(client, search_name, t)
+        if repaired:
+            log.info(f"  [trim-ai] {search_name}: מעבר תיקון מילא {repaired} שדות")
 
-    # ── repair pass: fill missing specs per trim from the detailed spec pages ──
-    repaired = 0
-    for t in trims:
-        repaired += _repair_trim(client, search_name, t)
-    if repaired:
-        log.info(f"  [trim-ai] {search_name}: מעבר תיקון מילא {repaired} שדות")
-
-    log.info(f"  [trim-ai] {search_name}: {len(trims)} גרסאות סופיות")
+    log.info(f"  [trim-ai] {search_name}: {len(trims)} גרסאות סופיות [{source}]")
     for t in trims:
         parts = [f"₪{t['price']:,}"]
         src   = t.get("price_source", "?")

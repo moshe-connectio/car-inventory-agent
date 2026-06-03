@@ -101,7 +101,7 @@ def _download_and_store(url: str, filename: str) -> str:
     """Downloads image from URL, saves to IMAGES_DIR, returns permanent local URL."""
     import os
     images_dir  = os.environ.get("IMAGES_DIR", "/var/www/car-images")
-    images_base = os.environ.get("IMAGES_BASE_URL", "http://46.101.128.223/car-images")
+    images_base = os.environ.get("IMAGES_BASE_URL", "https://images.gsmdev.co.il/car-images")
     os.makedirs(images_dir, exist_ok=True)
     path = os.path.join(images_dir, filename)
     resp = httpx.get(url, timeout=15)
@@ -114,8 +114,11 @@ def _download_and_store(url: str, filename: str) -> str:
 def get_image_carimagesapi(mfr_en: str, name_en: str) -> str:
     """Fallback: carimagesapi.com — downloads image locally, returns permanent URL."""
     import os
-    api_key    = os.environ.get("CARIMAGES_API_KEY", "ci_2b68a56ce8252d49f71206fbf877e79d3766c223c2832b862af906ad")
-    api_secret = os.environ.get("CARIMAGES_API_SECRET", "49e9715026231b80e627e20456eecb402bb7a7278244753ee7ba476e53f4be92")
+    api_key    = os.environ.get("CARIMAGES_API_KEY")
+    api_secret = os.environ.get("CARIMAGES_API_SECRET")
+    if not api_key or not api_secret:
+        log.warning("  [carimagesapi] CARIMAGES_API_KEY/SECRET לא מוגדרים — מדלג")
+        return ""
 
     # Strip brand prefix: "BYD Seal" → model="Seal"
     model_name = name_en

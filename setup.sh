@@ -11,7 +11,15 @@ systemctl enable redis-server && systemctl start redis-server
 cd /opt/car-agent
 python3 -m venv venv
 source venv/bin/activate
-pip install fastapi uvicorn celery redis httpx
+pip install fastapi uvicorn celery redis httpx openai json-repair
+
+# .env - סודות (לא ב-git). צור מ-.env.example לפני ההפעלה הראשונה.
+if [ ! -f /opt/car-agent/.env ]; then
+  echo "⚠️  /opt/car-agent/.env חסר — העתק מ-.env.example ומלא ערכים אמיתיים:"
+  echo "    cp /opt/car-agent/.env.example /opt/car-agent/.env && nano /opt/car-agent/.env"
+  cp /opt/car-agent/.env.example /opt/car-agent/.env
+fi
+chmod 600 /opt/car-agent/.env
 
 # systemd - Webhook
 cat > /etc/systemd/system/car-webhook.service << 'EOF'
@@ -19,6 +27,8 @@ cat > /etc/systemd/system/car-webhook.service << 'EOF'
 Description=Car Agent Webhook
 After=network.target redis-server.service
 [Service]
+Environment=PYTHONPATH=/opt/car-agent
+EnvironmentFile=/opt/car-agent/.env
 WorkingDirectory=/opt/car-agent
 ExecStart=/opt/car-agent/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000
 Restart=always
@@ -33,8 +43,10 @@ cat > /etc/systemd/system/car-worker.service << 'EOF'
 Description=Car Agent Celery Worker
 After=network.target redis-server.service
 [Service]
+Environment=PYTHONPATH=/opt/car-agent
+EnvironmentFile=/opt/car-agent/.env
 WorkingDirectory=/opt/car-agent
-ExecStart=/opt/car-agent/venv/bin/celery -A tasks worker --loglevel=info --concurrency=4
+ExecStart=/opt/car-agent/venv/bin/celery -A tasks worker --loglevel=info --concurrency=1 --max-tasks-per-child=50
 Restart=always
 RestartSec=10
 [Install]

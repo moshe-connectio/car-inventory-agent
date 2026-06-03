@@ -1,4 +1,5 @@
 import json
+import os
 import httpx
 import logging
 
@@ -6,15 +7,23 @@ log = logging.getLogger(__name__)
 
 TIMEOUT = 30
 
-_MANUFACTURER_URL = (
-    "https://www.zohoapis.com/crm/v7/functions/manufacturer_agent_do/actions/execute"
-    "?auth_type=apikey&zapikey=1003.0e96001b632e81eb3d8f9880e9c49739.97e21cbe9c4d8a57b4be4be3350ab4ab"
-)
+_ZAPIKEY = os.environ.get("ZOHO_APIKEY")
+if not _ZAPIKEY:
+    raise RuntimeError(
+        "ZOHO_APIKEY לא מוגדר — הגדר אותו ב-.env / EnvironmentFile של השירות"
+    )
 
-_MODEL_URL = (
-    "https://www.zohoapis.com/crm/v7/functions/car_model_agent_do/actions/execute"
-    "?auth_type=apikey&zapikey=1003.0e96001b632e81eb3d8f9880e9c49739.97e21cbe9c4d8a57b4be4be3350ab4ab"
-)
+_FN_BASE = "https://www.zohoapis.com/crm/v7/functions/{fn}/actions/execute"
+_AUTH    = f"?auth_type=apikey&zapikey={_ZAPIKEY}"
+
+
+def _fn_url(fn: str) -> str:
+    return _FN_BASE.format(fn=fn) + _AUTH
+
+
+_MANUFACTURER_URL = _fn_url("manufacturer_agent_do")
+
+_MODEL_URL = _fn_url("car_model_agent_do")
 
 
 def _call(url: str, body: dict) -> dict:
@@ -51,10 +60,7 @@ def update_model(model_id: str, changes: dict) -> dict:
 
 # ── גרסאות (רמות גימור) ───────────────────────────────────
 
-_TRIM_URL = (
-    "https://www.zohoapis.com/crm/v7/functions/carfinishlevelagentdo/actions/execute"
-    "?auth_type=apikey&zapikey=1003.0e96001b632e81eb3d8f9880e9c49739.97e21cbe9c4d8a57b4be4be3350ab4ab"
-)
+_TRIM_URL = _fn_url("carfinishlevelagentdo")
 
 
 def get_trims(model_id: str) -> list[dict]:

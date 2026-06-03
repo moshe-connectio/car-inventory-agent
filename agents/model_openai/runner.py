@@ -6,12 +6,10 @@ import json
 import re
 import logging
 
-from openai import OpenAI
-
-from .utils import CAR_TYPES, ai_call, parse_json, get_client, validate_record
+from .utils import CAR_TYPES, get_client, validate_record, strip_manufacturer_prefix
 from .icar import get_israel_models, _he_prefix_match
 from .details import get_details
-from .images import get_image, verify_url, get_image_carimagesapi
+from .images import get_image_carimagesapi
 
 log = logging.getLogger(__name__)
 
@@ -21,87 +19,6 @@ def _zoho():
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
     from zoho_client import create_model, update_model
     return create_model, update_model
-
-
-# ── confirmation helpers ──────────────────────────────────────────────────────
-
-def _confirm_activate(client: OpenAI, mfr_en: str, candidates: list[dict]) -> set[str]:
-    """Verification before activating models — only used when source is AI (not icar)."""
-    if not candidates:
-        return set()
-    names = "\n".join(f"- {m['Name']} ({m.get('Car_Model_Name_HE','')})" for m in candidates)
-    prompt = f"""VERIFICATION before activating {mfr_en} models in the Israeli new-car database.
-
-Models flagged for activation (currently INACTIVE, AI says they may be active):
-{names}
-
-The bar for activation is HIGH. Search specifically for:
-- Official {mfr_en} Israeli importer website listing these models with 2025-2026 pricing
-- Pages on auto.co.il or icar.co.il showing these models as current new cars
-
-STRICT RULES:
-- activate=true ONLY if you find an official Israeli importer actively selling the model in 2025-2026
-- activate=false if only found on yad2 used listings, pre-2024 articles, or no Israeli source at all
-- Default to activate=false when uncertain
-
-Return ONLY valid JSON:
-{{
-  "verdicts": {{
-    "Model Name": {{"activate": false, "reason": "no Israeli importer found for this model"}}
-  }}
-}}"""
-
-    verdicts = parse_json(ai_call(client, prompt)).get("verdicts", {})
-    confirmed = set()
-    for m in candidates:
-        name = m["Name"]
-        v = verdicts.get(name, {})
-        if v.get("activate", False):
-            confirmed.add(name)
-            log.info(f"  [activate] confirmed: {name} — {v.get('reason','')}")
-        else:
-            log.info(f"  [activate] blocked: {name} — {v.get('reason','')}")
-    return confirmed
-
-
-def _confirm_deactivate(client: OpenAI, mfr_en: str, candidates: list[dict]) -> set[str]:
-    if not candidates:
-        return set()
-    names = "\n".join(f"- {m['Name']} ({m.get('Car_Model_Name_HE','')})" for m in candidates)
-    prompt = f"""FINAL CONFIRMATION before deactivating {mfr_en} models in Israeli database.
-
-Models flagged for deactivation:
-{names}
-
-Search one more time for each model — look for ANY evidence of current Israeli sales:
-- Official importer website
-- yad2.co.il new cars
-- Recent news (2024-2026)
-
-Rules:
-- deactivate=false → keep active if ANY current Israeli evidence found
-- deactivate=true  → confirmed, high confidence only
-- Default to keeping active when uncertain
-
-Return ONLY valid JSON:
-{{
-  "verdicts": {{
-    "Trailblazer": {{"deactivate": false, "reason": "still listed on importer site"}},
-    "Spark":       {{"deactivate": true,  "reason": "discontinued, no Israeli sales since 2022"}}
-  }}
-}}"""
-
-    verdicts = parse_json(ai_call(client, prompt)).get("verdicts", {})
-    confirmed = set()
-    for m in candidates:
-        name = m["Name"]
-        v = verdicts.get(name, {})
-        if v.get("deactivate", False):
-            confirmed.add(name)
-            log.info(f"  [deactivate] confirmed: {name} — {v.get('reason','')}")
-        else:
-            log.info(f"  [deactivate] kept active: {name} — {v.get('reason','')}")
-    return confirmed
 
 
 # ── main entry point ──────────────────────────────────────────────────────────
@@ -129,6 +46,31 @@ def run(payload) -> dict:
     log.info("══════════════════════════════════════════════")
     log.info(f"יצרן: {mfr_en} ({mfr_he}) | דגמים קיימים: {len(existing)}")
     log.info("══════════════════════════════════════════════")
+
+    # ── normalize existing names (strip manufacturer prefix) ───────────────────
+    # Must run before matching dicts are built so clean names flow through everywhere.
+    _rename_updates: list[tuple[str, dict, str]] = []
+    for m in existing:
+        orig_en = m.get("Name", "")
+        orig_he = m.get("Car_Model_Name_HE", "")
+        clean_en = strip_manufacturer_prefix(orig_en, mfr_en, mfr_he)
+        clean_he = strip_manufacturer_prefix(orig_he, mfr_en, mfr_he) if orig_he else orig_he
+        update: dict = {}
+        if clean_en != orig_en:
+            update["Name"] = clean_en
+            m["Name"] = clean_en
+        if clean_he != orig_he:
+            update["Car_Model_Name_HE"] = clean_he
+            m["Car_Model_Name_HE"] = clean_he
+        if update and m.get("id"):
+            _rename_updates.append((m["id"], update, orig_en))
+
+    for mid, update, old_name in _rename_updates:
+        try:
+            update_model(mid, update)
+            log.info(f"  [name-clean] ✅ '{old_name}' → {update}")
+        except Exception as e:
+            log.error(f"  [name-clean] ❌ {old_name}: {e}")
 
     client = get_client()
 
@@ -193,10 +135,16 @@ def run(payload) -> dict:
         if not img_url:
             return ""
         fname = img_url.rsplit("/", 1)[-1].lower()
-        slug = re.sub(r'-new\.(jpg|png|webp)$', '', fname)
-        pfx = mfr_en.lower().replace(" ", "-") + "-"
-        if slug.startswith(pfx):
-            slug = slug[len(pfx):]
+        slug = re.sub(r'\.(jpg|png|webp)$', '', fname)
+        slug = re.sub(r'-new$', '', slug)
+        slug = re.sub(r'-\d{4}$', '', slug)  # strip year suffix (-2020, etc.)
+        for pfx in [
+            mfr_en.lower().replace(" ", "-") + "-",
+            mfr_en.lower().replace(" ", "") + "-",  # e.g. "landrover-"
+        ]:
+            if slug.startswith(pfx):
+                slug = slug[len(pfx):]
+                break
         return slug.replace("-", " ")
 
     existing_base_lower: dict[str, str] = {}
@@ -328,26 +276,26 @@ def run(payload) -> dict:
     log.info(f"  ללא שינוי: {len(no_change)}")
 
     # ── confirm ────────────────────────────────────────────────
-    ai_found_zero = (not israel_models and not icar_used)
-
-    if icar_used:
-        confirmed_on  = {m["Name"] for m in to_activate}
-        confirmed_off = {m["Name"] for m in to_deactivate_cands}
-        if confirmed_off:
-            log.info(f"[icar] כיבוי ישיר (icar authoritative): {confirmed_off}")
-    elif ai_found_zero:
-        confirmed_on  = set()
-        confirmed_off = {m["Name"] for m in to_deactivate_cands}
-        log.info(f"[AI-zero] כיבוי ישיר (AI found 0 models): {confirmed_off}")
-    else:
-        confirmed_on  = _confirm_activate(client, mfr_en, to_activate) if to_activate else set()
-        confirmed_off = _confirm_deactivate(client, mfr_en, to_deactivate_cands)
+    # icar is authoritative — no AI confirmation step needed
+    confirmed_on  = {m["Name"] for m in to_activate}
+    confirmed_off = {m["Name"] for m in to_deactivate_cands}
+    if confirmed_off:
+        log.info(f"[confirm] כיבוי ישיר: {confirmed_off}")
 
     # ── build new records ──────────────────────────────────────
     new_records = []
     for nm in to_create:
         name_en = nm.get("name_en", "")
         name_he = nm.get("name_he", "")
+
+        # Pre-extract English from icar image slug when name_en is missing
+        if not name_en and nm.get("image_url"):
+            slug = _slug_to_base(nm["image_url"])
+            if slug and all(c.isascii() for c in slug) and slug.strip():
+                name_en = slug.title()
+                nm["name_en"] = name_en
+                log.info(f"  [slug-en] extracted '{name_en}' from image slug")
+
         label   = name_en or name_he
         log.info(f"[build] {label}...")
 
@@ -379,8 +327,10 @@ def run(payload) -> dict:
         try:
             result = create_model(record)
             try:
-                output  = json.loads(result.get("details", {}).get("output", "{}"))
-                zoho_id = output.get("id") or (output.get("message") or {}).get("id")
+                zoho_id = (result.get("message") or {}).get("id") or result.get("id")
+                if not zoho_id:
+                    output  = json.loads(result.get("details", {}).get("output", "{}"))
+                    zoho_id = output.get("id") or (output.get("message") or {}).get("id")
             except Exception:
                 zoho_id = None
             stats["created"] += 1
@@ -428,14 +378,6 @@ def run(payload) -> dict:
             log.error(f"  ❌ deactivate {name}: {e}")
 
     # ── image updates for existing models ─────────────────────
-    icar_img_by_he: dict[str, str] = {}
-    for m in israel_models:
-        if m.get("image_url"):
-            icar_img_by_he[m["name_he"].upper()] = m["image_url"]
-            parts = m["name_he"].split(" ", 1)
-            if len(parts) == 2:
-                icar_img_by_he[parts[1].upper()] = m["image_url"]
-
     for m in existing:
         name    = m.get("Name", "")
         name_he = m.get("Car_Model_Name_HE", "")
@@ -443,12 +385,6 @@ def run(payload) -> dict:
             continue
         mid     = m.get("id", "")
         current = m.get("Model_Image_URL", "")
-        icar_img = icar_img_by_he.get(name_he.upper()) or icar_img_by_he.get(name.upper())
-        if not icar_img:
-            for key, url in icar_img_by_he.items():
-                if _he_prefix_match(name_he.upper(), key):
-                    icar_img = url
-                    break
 
         if (current or "").startswith("https://images.gsmdev.co.il/car-images/"):
             log.info(f"  [image-fix] ⏭  {name} — תמונה קיימת על השרת, מדלג")

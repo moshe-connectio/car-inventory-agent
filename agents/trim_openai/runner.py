@@ -7,6 +7,8 @@ import os
 import re
 import sys
 
+from .fields import CHANGE_FIELDS, FIELD_SPECS
+
 log = logging.getLogger(__name__)
 
 
@@ -24,39 +26,21 @@ def _build_zoho_trim(trim: dict, mfr_id: str, model_id: str) -> dict:
         "Model":                    model_id,
         "Active":                   True,
     }
-    for field, key, cast in [
-        ("Unit_Price",   "price",       int),
-        ("sec",          "sec",         float),
-        ("Top_Speed",    "top_speed",   int),
-        ("Screen_inch",  "screen_inch", float),
-        ("Doors",        "doors",       int),
-        ("Seats",        "seats",       int),
-    ]:
-        if trim.get(key) is not None:
-            try:
-                rec[field] = cast(trim[key])
-            except (TypeError, ValueError):
-                pass
-
-    if trim.get("hp") is not None:
+    # Map every known field (core + 2026 enrichment) — only when a value is present.
+    for field, key, cast in FIELD_SPECS:
+        v = trim.get(key)
+        if v is None or v == "":
+            continue
         try:
-            rec["HP"] = str(int(trim["hp"]))
+            rec[field] = cast(v)
         except (TypeError, ValueError):
             pass
-
-    if trim.get("range_km") is not None:
-        rec["Range_km"] = str(trim["range_km"])
-
     return rec
 
 
 def _changed_fields(existing: dict, new_rec: dict) -> dict:
-    check = [
-        "Unit_Price", "HP", "sec", "Range_km",
-        "Top_Speed", "Screen_inch", "Doors", "Seats", "Car_Finish_level_Name_EN",
-    ]
     changes = {}
-    for f in check:
+    for f in CHANGE_FIELDS:
         if f not in new_rec:
             continue
         if str(existing.get(f, "")) != str(new_rec[f]):
@@ -148,6 +132,7 @@ def _ai_norm_set(trims: list[dict], key: str) -> set[str]:
 
 def run(payload) -> dict:
     from .fetcher import get_trims_ai
+    from .validator import validate_fetch
     from ..model_openai.utils import get_client
 
     client = get_client()
@@ -171,7 +156,7 @@ def run(payload) -> dict:
         "manufacturer": mfr_en,
         "models": len(models),
         "created": 0, "updated": 0, "activated": 0,
-        "deactivated": 0, "no_change": 0, "errors": 0,
+        "deactivated": 0, "no_change": 0, "rejected": 0, "errors": 0,
     }
 
     for model in models:
@@ -186,7 +171,7 @@ def run(payload) -> dict:
 
         log.info(f"")
         log.info(f"  ┌── {model_en}{(' (' + model_he + ')') if model_he else ''}")
-        _snap = {k: stats[k] for k in ("created","updated","activated","deactivated","no_change","errors")}
+        _snap = {k: stats[k] for k in ("created","updated","activated","deactivated","no_change","rejected","errors")}
 
         # ── שלוף קיים מ-Zoho ──────────────────────────────
         existing_trims: list[dict] = []
@@ -212,14 +197,26 @@ def run(payload) -> dict:
             stats["errors"] += 1
             continue
 
-        # מיפוי שמות AI (כולל נורמליזציה) לצורך בדיקת כיבוי
-        ai_he_set = _ai_norm_set(ai_trims, "name_he")
-        ai_en_set = _ai_norm_set(ai_trims, "name_en")
+        # ── שער אימות דטרמיניסטי ────────────────────────────
+        # בודק שלמות + תקינות לפני כל כתיבה. רק גרסאות שעברו נכתבות.
+        vf          = validate_fetch(ai_trims)
+        valid_trims = vf["valid"]
+        if vf["rejected"]:
+            stats["rejected"] += len(vf["rejected"])
+            log.warning(f"     [validate] {len(vf['rejected'])} גרסאות נדחו ולא ייכתבו")
+        if not valid_trims:
+            log.error(f"  [trim-runner] {model_en}: אף גרסה לא עברה אימות — לא משנה דבר בדגם")
+            stats["errors"] += 1
+            continue
+
+        # מיפוי שמות הגרסאות שאומתו (כולל נורמליזציה) לצורך בדיקת כיבוי
+        ai_he_set = _ai_norm_set(valid_trims, "name_he")
+        ai_en_set = _ai_norm_set(valid_trims, "name_en")
 
         # ── כתיבה ל-Zoho ────────────────────────────────────
         resolved_ids = set()
 
-        for trim in ai_trims:
+        for trim in valid_trims:
             name_he = (trim.get("name_he") or "").strip()
             name_en = (trim.get("name_en") or "").strip()
             if not name_he:
@@ -267,10 +264,10 @@ def run(payload) -> dict:
                     stats["no_change"] += 1
 
         _d = lambda k: stats[k] - _snap[k]
-        log.info(f"  └── {model_en}: +{_d('created')} ↑{_d('activated')} ~{_d('updated')} ↓{_d('deactivated')} ={_d('no_change')} !{_d('errors')}")
+        log.info(f"  └── {model_en}: +{_d('created')} ↑{_d('activated')} ~{_d('updated')} ↓{_d('deactivated')} ={_d('no_change')} ✗{_d('rejected')} !{_d('errors')}")
 
-        # ── כיבוי גרסאות שלא ב-AI ─────────────────────────
-        if zoho_get_ok and ai_trims:
+        # ── כיבוי גרסאות שלא נמצאו (רק כששליפה תקינה) ─────
+        if zoho_get_ok and vf["complete"]:
             for t in existing_trims:
                 if t.get("id") in resolved_ids:
                     continue
@@ -294,6 +291,6 @@ def run(payload) -> dict:
     log.info(
         f"[trim-runner] {mfr_en}: "
         f"+{stats['created']} ↑{stats['activated']} ~{stats['updated']} "
-        f"↓{stats['deactivated']} ={stats['no_change']} !{stats['errors']}"
+        f"↓{stats['deactivated']} ={stats['no_change']} ✗{stats['rejected']} !{stats['errors']}"
     )
     return stats

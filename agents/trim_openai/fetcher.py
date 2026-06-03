@@ -2,20 +2,18 @@
 agents/trim_openai/fetcher.py
 Single-call trim fetcher:
   One AI call per model — finds prices from icar.co.il (primary) or auto.co.il (fallback)
-  and extracts full specs from auto.co.il in the same call.
-  icar price is always authoritative when found; auto specs are always preferred.
+  and extracts a full 2026 spec sheet from icar/auto/gov.il in the same call.
+  icar price is always authoritative when found; specs are read straight from the
+  approved sources and never guessed.
 """
 import logging
 
 from openai import OpenAI
 
 from ..model_openai.utils import ai_call, parse_json
+from .fields import APPROVED_SOURCES, MAX_PRICE, MIN_PRICE, SPEC_KEYS
 
 log = logging.getLogger(__name__)
-
-_MIN_PRICE = 55_000
-_MAX_PRICE = 1_500_000
-_APPROVED_SOURCES = ("icar.co.il", "auto.co.il", "gov.il")
 
 
 def _icar_url_hint(mfr_he: str, model_he: str) -> str:
@@ -38,8 +36,9 @@ def _fetch_all(
     client: OpenAI, search_name: str, mfr_he: str, model_he: str
 ) -> list[dict]:
     """
-    Single AI call: find prices (icar primary, auto fallback) and full specs (auto).
-    Returns validated trim list.
+    Single AI call: prices (icar primary, auto fallback) + full 2026 spec sheet
+    (icar/auto for technical specs, gov.il for regulatory specs).
+    Returns a list of trims with raw values (validation happens later in validator.py).
     """
     url_hint = _icar_url_hint(mfr_he, model_he)
     icar_line = (
@@ -48,41 +47,47 @@ def _fetch_all(
         else f"\n   Search: site:icar.co.il {search_name} מחירון"
     )
 
-    prompt = f"""Research {search_name} trim levels and prices for Israel (2025-2026).
+    prompt = f"""Research {search_name} trim levels, prices and FULL specs for Israel, model year 2026.
 
 APPROVED SOURCES ONLY: icar.co.il | auto.co.il | gov.il (מינהל הרכב)
-Every single data point — price AND spec — must be read directly from one of these three sites.
+Every single data point — price AND every spec — must be read directly from one of
+these three sites. Prefer the most current 2026 data shown.
 
-══ STEP 1 — PRICES from icar.co.il (PRIMARY SOURCE) ══{icar_line}
-   • Open that URL and read the מחירון (price list) table
-   • If the URL fails or shows no table, try: site:icar.co.il {search_name} מחירון
-   • icar shows: trim name | engine | price (ILS)
-   • Collect EVERY row — do not skip any trim
+══ STEP 1 — PRICES & SPECS from icar.co.il (PRIMARY SOURCE) ══{icar_line}
+   • Open that URL and read the מחירון (price list) table — collect EVERY trim row
+   • icar shows: trim name | engine | price (ILS) | and often monthly finance payment
+   • Read the full specification table icar shows for each trim
 
-══ STEP 2 — PRICES from auto.co.il (FALLBACK — only if icar has NO price page) ══
-   • Search https://www.auto.co.il/ for "{search_name}"
-   • Find the model page with trim list and MSRP prices in ILS
-   • Collect all trims with prices
+══ STEP 2 — auto.co.il (FALLBACK — only if icar has NO price page) ══
+   • Search https://www.auto.co.il/ for "{search_name}", open the model page
+   • Collect all trims with MSRP prices in ILS and their spec comparison table
 
-══ STEP 3 — SPECS (for ALL trims found) ══
-   • Fetch the auto.co.il trim comparison page for {search_name}
-   • Extract specs AS SHOWN on the page: hp, 0-100 sec, range km, top speed, screen size, doors, seats
-   • If a spec is not shown on the page → use null, never guess or estimate
-   • spec_source_url must be the exact auto.co.il (or icar/gov.il) URL you read
+══ STEP 3 — gov.il (מינהל הרכב) — REGULATORY SPECS ══
+   • For Israeli-market specs not on icar/auto, read gov.il:
+     pollution level (דרגת זיהום אוויר 1-15), safety equipment level (רמת אבזור בטיחותי 0-8),
+     official dimensions and curb weight.
+
+══ COLLECT FOR EVERY TRIM (read from the page — never guess) ══
+   price, monthly_payment, hp, torque_nm, engine_cc, transmission (e.g. אוטומטית 8 הילוכים),
+   drivetrain (קדמית/אחורית/4X4), sec (0-100), top_speed, range_km, battery_kwh, charging_kw,
+   fuel_consumption (km/L combined), pollution_level, safety_level,
+   length_mm, width_mm, height_mm, trunk_liters, weight_kg, screen_inch, doors, seats,
+   warranty (manufacturer warranty text, e.g. 3 שנים / 100,000 ק.מ).
 
 ══ STRICT RULES ══
-✅ Prices must be ILS — Israeli new cars cost ₪{_MIN_PRICE:,} to ₪{_MAX_PRICE:,}
-✅ source_url must be from icar.co.il, auto.co.il, or gov.il
-✅ spec_source_url must be from icar.co.il, auto.co.il, or gov.il
+✅ Prices must be ILS — Israeli new cars cost ₪{MIN_PRICE:,} to ₪{MAX_PRICE:,}
+✅ source_url AND spec_source_url must be from icar.co.il, auto.co.il, or gov.il
 ✅ price_source: "icar" | "auto" | "gov"
 ✅ name_he must be UNIQUE per trim
+✅ Electric trims: fill battery_kwh, charging_kw, range_km (no engine_cc/fuel_consumption)
+✅ Combustion trims: fill engine_cc, fuel_consumption (no battery_kwh)
 ❌ NEVER invent or estimate any value — price or spec
-❌ NEVER use ynet, walla, carexpert, manufacturer sites, or any other source
+❌ NEVER use ynet, walla, carexpert, manufacturer global sites, or any other source
 ❌ USD/EUR prices are wrong for Israel — do not include or convert
-❌ Prices below ₪{_MIN_PRICE:,} are wrong — exclude them
-❌ If a spec field is unknown → set null, not a guess
+❌ If a spec field is unknown on the approved sources → set null, not a guess
+❌ No double-quote characters inside Hebrew string values — use . instead (ק.מ not ק"מ)
 
-If no current 2025-2026 Israeli pricing found on approved sites → return {{"trims": []}}
+If no current 2026 Israeli pricing found on approved sources → return {{"trims": []}}
 
 Return ONLY valid JSON (no markdown):
 {{
@@ -92,24 +97,39 @@ Return ONLY valid JSON (no markdown):
       "name_he": "LT 2.0T AWD",
       "name_en": "LT 2.0T AWD",
       "price": 189900,
+      "monthly_payment": 2490,
       "price_source": "icar",
       "source_url": "https://www.icar.co.il/...",
       "spec_source_url": "https://www.auto.co.il/...",
       "hp": 175,
+      "torque_nm": 350,
+      "engine_cc": 1998,
+      "transmission": "אוטומטית 8 הילוכים",
+      "drivetrain": "4X4",
       "sec": 8.5,
-      "range_km": null,
       "top_speed": 195,
+      "range_km": null,
+      "battery_kwh": null,
+      "charging_kw": null,
+      "fuel_consumption": 12.5,
+      "pollution_level": 9,
+      "safety_level": 7,
+      "length_mm": 4630,
+      "width_mm": 1875,
+      "height_mm": 1675,
+      "trunk_liters": 500,
+      "weight_kg": 1720,
       "screen_inch": 10.2,
       "doors": 5,
-      "seats": 5
+      "seats": 5,
+      "warranty": "3 שנים / 100,000 ק.מ"
     }}
   ]
 }}"""
 
     text = ai_call(client, prompt)
     data = parse_json(text)
-    raw   = data.get("trims", [])
-    icar_found = bool(data.get("icar_found"))
+    raw  = data.get("trims", [])
 
     out = []
     seen = set()
@@ -120,21 +140,22 @@ Return ONLY valid JSON (no markdown):
 
         if not name or name.upper() in seen:
             continue
-        if not isinstance(price, (int, float)) or not (_MIN_PRICE <= int(price) <= _MAX_PRICE):
+        if not isinstance(price, (int, float)) or not (MIN_PRICE <= int(price) <= MAX_PRICE):
             log.warning(f"  [fetch] '{name}' — מחיר לא תקין: {price!r}")
             continue
-        if not any(s in src for s in _APPROVED_SOURCES):
+        if not any(s in src for s in APPROVED_SOURCES):
             log.warning(f"  [fetch] '{name}' — מקור מחיר לא מורשה: {src!r}")
             continue
 
+        # Specs must also come from an approved page — otherwise drop ALL spec fields.
         spec_src = (t.get("spec_source_url") or "").lower()
-        if spec_src and not any(s in spec_src for s in _APPROVED_SOURCES):
+        if spec_src and not any(s in spec_src for s in APPROVED_SOURCES):
             log.warning(f"  [fetch] '{name}' — מקור ספקים לא מורשה: {spec_src!r} — מנקה ספקים")
-            for spec_field in ("hp", "sec", "range_km", "top_speed", "screen_inch", "doors", "seats"):
+            for spec_field in SPEC_KEYS:
                 t[spec_field] = None
 
         seen.add(name.upper())
-        t["price"]        = int(price)
+        t["price"] = int(price)
         if "icar.co.il" in src:
             t["price_source"] = "icar"
         elif "gov.il" in src:
@@ -158,7 +179,7 @@ def get_trims_ai(
     client: OpenAI, mfr_en: str, mfr_he: str, model_en: str, model_he: str
 ) -> list[dict]:
     """
-    Single-call fetch: icar.co.il prices (primary) + auto.co.il specs.
+    Single-call fetch: icar.co.il prices (primary) + auto/gov specs.
     Returns [] if no Israeli prices found.
     """
     search_name = (
@@ -178,13 +199,14 @@ def get_trims_ai(
     for t in trims:
         parts = [f"₪{t['price']:,}"]
         src   = t.get("price_source", "?")
-        if t.get("hp"):          parts.append(f"{t['hp']}כ\"ס")
-        if t.get("sec"):         parts.append(f"{t['sec']}שנ'")
-        if t.get("range_km"):    parts.append(f"{t['range_km']}ק\"מ")
-        if t.get("top_speed"):   parts.append(f"{t['top_speed']}קמ\"ש")
-        if t.get("screen_inch"): parts.append(f"{t['screen_inch']}\"")
-        if t.get("doors"):       parts.append(f"{t['doors']}ד'")
-        if t.get("seats"):       parts.append(f"{t['seats']}מ'")
+        if t.get("hp"):           parts.append(f"{t['hp']}כ.ס")
+        if t.get("sec"):          parts.append(f"{t['sec']}שנ'")
+        if t.get("range_km"):     parts.append(f"{t['range_km']}ק.מ")
+        if t.get("battery_kwh"):  parts.append(f"{t['battery_kwh']}kWh")
+        if t.get("transmission"): parts.append(str(t['transmission']))
+        if t.get("drivetrain"):   parts.append(str(t['drivetrain']))
+        if t.get("pollution_level"): parts.append(f"זיהום {t['pollution_level']}")
+        if t.get("safety_level"):    parts.append(f"בטיחות {t['safety_level']}")
         mark = "📋" if src == "icar" else "🌐"
         log.info(f"    {mark} {t['name_he']} [{src}] | {' | '.join(parts)}")
 

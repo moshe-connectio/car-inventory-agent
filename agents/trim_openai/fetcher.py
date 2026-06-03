@@ -7,6 +7,7 @@ Single-call trim fetcher:
   approved sources and never guessed.
 """
 import logging
+import os
 
 from openai import OpenAI
 
@@ -14,6 +15,21 @@ from ..model_openai.utils import ai_call, parse_json
 from .fields import APPROVED_SOURCES, MAX_PRICE, MIN_PRICE, SPEC_KEYS
 
 log = logging.getLogger(__name__)
+
+# Trim research needs a stronger researcher than the model agent's default.
+# Override per-deployment with TRIM_MODEL in .env.
+TRIM_MODEL = os.environ.get("TRIM_MODEL", "gpt-4o")
+
+# Specs we actively try to fill via the repair pass (the ones worth a follow-up call).
+_REPAIR_SPECS = [
+    "hp", "torque_nm", "engine_cc", "transmission", "drivetrain", "sec", "top_speed",
+    "range_km", "battery_kwh", "charging_kw", "fuel_consumption",
+    "pollution_level", "safety_level",
+    "length_mm", "width_mm", "height_mm", "trunk_liters", "weight_kg",
+    "screen_inch", "monthly_payment",
+]
+# Don't bother with a repair call unless at least this many important specs are missing.
+_REPAIR_THRESHOLD = 3
 
 
 def _icar_url_hint(mfr_he: str, model_he: str) -> str:
@@ -79,6 +95,10 @@ these three sites. Prefer the most current 2026 data shown.
 ✅ source_url AND spec_source_url must be from icar.co.il, auto.co.il, or gov.il
 ✅ price_source: "icar" | "auto" | "gov"
 ✅ name_he must be UNIQUE per trim
+✅ NAMING (critical for matching): name_he and name_en must be the trim's FULL designation
+   exactly as on the מחירון, INCLUDING its engine/drivetrain suffix (e.g. "Ultra 2X4",
+   "Long Range 4X4", "GT-Line 1.6T"). Always name the same trim identically across runs.
+   Do NOT include the manufacturer or model name in the trim name (no "Hyundai Ioniq 6 …").
 ✅ Electric trims: fill battery_kwh, charging_kw, range_km (no engine_cc/fuel_consumption)
 ✅ Combustion trims: fill engine_cc, fuel_consumption (no battery_kwh)
 ❌ NEVER invent or estimate any value — price or spec
@@ -127,7 +147,7 @@ Return ONLY valid JSON (no markdown):
   ]
 }}"""
 
-    text = ai_call(client, prompt)
+    text = ai_call(client, prompt, model=TRIM_MODEL)
     data = parse_json(text)
     raw  = data.get("trims", [])
 
@@ -173,6 +193,66 @@ Return ONLY valid JSON (no markdown):
     return out
 
 
+# ── Repair pass ──────────────────────────────────────────────────────────────
+
+def _missing_specs(trim: dict) -> list[str]:
+    return [k for k in _REPAIR_SPECS if trim.get(k) in (None, "")]
+
+
+def _repair_trim(client: OpenAI, search_name: str, trim: dict) -> int:
+    """
+    Targeted follow-up call: fill ONLY the missing specs for one specific trim,
+    read straight from the approved spec pages. Never overwrites existing values.
+    Returns how many fields were filled.
+    """
+    missing = _missing_specs(trim)
+    if len(missing) < _REPAIR_THRESHOLD:
+        return 0
+
+    name = trim.get("name_he") or trim.get("name_en") or ""
+    keys = ", ".join(missing)
+    prompt = f"""Find the missing technical specs for ONE specific trim of {search_name}, Israel 2026.
+
+Trim: "{name}"  (price ₪{trim.get('price','?')})
+
+APPROVED SOURCES ONLY: icar.co.il | auto.co.il | gov.il (מינהל הרכב)
+Open the full specification / comparison table for this exact trim and read the values.
+Use gov.il (מינהל הרכב) for pollution_level, safety_level, dimensions and weight.
+
+Fill ONLY these fields (the ones we are still missing): {keys}
+
+RULES:
+❌ NEVER guess or estimate — if a value is not shown on an approved page, return null.
+✅ spec_source_url must be from icar.co.il, auto.co.il, or gov.il.
+✅ drivetrain ∈ {{קדמית, אחורית, 4X4}} ; transmission as shown (e.g. אוטומטית 8 הילוכים).
+✅ No double-quote characters inside Hebrew values (use . — e.g. ק.מ not ק"מ).
+
+Return ONLY valid JSON with the requested keys + spec_source_url:
+{{"spec_source_url": "https://www.auto.co.il/...", {", ".join(f'"{k}": null' for k in missing)}}}"""
+
+    try:
+        data = parse_json(ai_call(client, prompt, model=TRIM_MODEL))
+    except Exception as e:
+        log.warning(f"  [repair] '{name}' נכשל: {e}")
+        return 0
+
+    spec_src = (data.get("spec_source_url") or "").lower()
+    if not any(s in spec_src for s in APPROVED_SOURCES):
+        log.warning(f"  [repair] '{name}' — מקור לא מאושר: {spec_src!r} — מתעלם")
+        return 0
+
+    filled = 0
+    for k in missing:
+        v = data.get(k)
+        if v in (None, ""):
+            continue
+        trim[k] = v          # validator later sanity-checks merged values
+        filled += 1
+    if filled:
+        log.info(f"  [repair] {name}: +{filled} שדות ({spec_src[:40]})")
+    return filled
+
+
 # ── Public entry point ─────────────────────────────────────────────────────────
 
 def get_trims_ai(
@@ -194,6 +274,13 @@ def get_trims_ai(
     if not trims:
         log.info(f"  [trim-ai] {search_name}: לא נמצאו מחירים — מדלג")
         return []
+
+    # ── repair pass: fill missing specs per trim from the detailed spec pages ──
+    repaired = 0
+    for t in trims:
+        repaired += _repair_trim(client, search_name, t)
+    if repaired:
+        log.info(f"  [trim-ai] {search_name}: מעבר תיקון מילא {repaired} שדות")
 
     log.info(f"  [trim-ai] {search_name}: {len(trims)} גרסאות סופיות")
     for t in trims:

@@ -53,9 +53,9 @@ def get_client() -> OpenAI:
     return OpenAI(api_key=key)
 
 
-def ai_call(client: OpenAI, prompt: str) -> str:
+def ai_call(client: OpenAI, prompt: str, model: str | None = None) -> str:
     resp = client.responses.create(
-        model=MODEL,
+        model=model or MODEL,
         max_output_tokens=MAX_OUTPUT_TOKENS,
         tools=[{"type": "web_search_preview"}],
         input=[{"role": "user", "content": prompt}],

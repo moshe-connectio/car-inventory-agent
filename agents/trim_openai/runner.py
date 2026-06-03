@@ -58,6 +58,31 @@ def _norm(name: str) -> str:
     return s.upper()
 
 
+def _prefix_tokens(*names: str) -> set[str]:
+    """Tokenise manufacturer + model names (both languages) for prefix stripping."""
+    toks = set()
+    for s in names:
+        for w in re.split(r'[\s,\-\.]+', (s or "").strip()):
+            if w:
+                toks.add(w.upper())
+    return toks
+
+
+def _strip_prefix(name: str, ptoks: set[str]) -> str:
+    """Drop leading manufacturer/model tokens: 'Hyundai Ioniq 6 Ultra 2x4' → 'Ultra 2x4'.
+
+    Makes trim matching robust to the AI sometimes prefixing the model name and
+    sometimes not — the root cause of duplicate trims.
+    """
+    if not name:
+        return name
+    words = name.split()
+    i = 0
+    while i < len(words) and re.sub(r'[,\-\.]', '', words[i]).upper() in ptoks:
+        i += 1
+    return " ".join(words[i:]).strip() if i < len(words) else name.strip()
+
+
 def _he_ok(name: str) -> bool:
     """True if the Name field contains real Hebrew (not Zoho's ????? corruption)."""
     return any('א' <= c <= 'ת' for c in name)
@@ -77,7 +102,7 @@ def _overlap(a: str, b: str) -> float:
 
 def _find_existing(name_he: str, name_en: str,
                    existing_by_he: dict, existing_by_en: dict,
-                   existing_trims: list[dict]) -> dict | None:
+                   existing_trims: list[dict], ptoks: set[str]) -> dict | None:
     # 1. Exact Hebrew match (skip if corrupted ???? values)
     if _he_ok(name_he):
         m = existing_by_he.get(name_he.upper())
@@ -103,7 +128,7 @@ def _find_existing(name_he: str, name_en: str,
     # 4. Word-overlap on English names (≥ 0.7) — handles "Boost" vs "Boost 2026"
     best_score, best_match = 0.0, None
     for t in existing_trims:
-        t_en = (t.get("Car_Finish_level_Name_EN") or "").strip()
+        t_en = _strip_prefix((t.get("Car_Finish_level_Name_EN") or "").strip(), ptoks)
         if not t_en:
             continue
         score = _overlap(name_en, t_en)
@@ -185,9 +210,10 @@ def run(payload) -> dict:
             stats["errors"] += 1
             continue
 
-        # אינדקס לפי שם
-        existing_by_he = {(t.get("Name") or "").strip().upper(): t for t in existing_trims}
-        existing_by_en = {(t.get("Car_Finish_level_Name_EN") or "").strip().upper(): t for t in existing_trims}
+        # תחיליות יצרן+דגם לחיתוך, ואינדקס לפי שם מנורמל (חסין-תחילית)
+        ptoks = _prefix_tokens(mfr_en, mfr_he, model_en, model_he)
+        existing_by_he = {_strip_prefix((t.get("Name") or "").strip(), ptoks).upper(): t for t in existing_trims}
+        existing_by_en = {_strip_prefix((t.get("Car_Finish_level_Name_EN") or "").strip(), ptoks).upper(): t for t in existing_trims}
 
         # ── AI fetch ───────────────────────────────────────
         try:
@@ -209,6 +235,12 @@ def run(payload) -> dict:
             stats["errors"] += 1
             continue
 
+        # נירמול קנוני: חיתוך תחילית יצרן+דגם משמות הגרסאות (גם he וגם en),
+        # כך שגרסה חדשה תיכתב נקייה ותותאם לקיימת ללא כפילות.
+        for trim in valid_trims:
+            trim["name_he"] = _strip_prefix((trim.get("name_he") or "").strip(), ptoks)
+            trim["name_en"] = _strip_prefix((trim.get("name_en") or "").strip(), ptoks)
+
         # מיפוי שמות הגרסאות שאומתו (כולל נורמליזציה) לצורך בדיקת כיבוי
         ai_he_set = _ai_norm_set(valid_trims, "name_he")
         ai_en_set = _ai_norm_set(valid_trims, "name_en")
@@ -224,7 +256,7 @@ def run(payload) -> dict:
 
             existing = _find_existing(
                 name_he, name_en,
-                existing_by_he, existing_by_en, existing_trims
+                existing_by_he, existing_by_en, existing_trims, ptoks
             )
 
             new_rec = _build_zoho_trim(trim, mfr_id, model_id)
@@ -266,13 +298,19 @@ def run(payload) -> dict:
         _d = lambda k: stats[k] - _snap[k]
         log.info(f"  └── {model_en}: +{_d('created')} ↑{_d('activated')} ~{_d('updated')} ↓{_d('deactivated')} ={_d('no_change')} ✗{_d('rejected')} !{_d('errors')}")
 
-        # ── כיבוי גרסאות שלא נמצאו (רק כששליפה תקינה) ─────
-        if zoho_get_ok and vf["complete"]:
+        # ── כיבוי גרסאות שלא נמצאו ─────────────────────────
+        # ריסון churn: מכבים רק כששליפה "מקיפה" — החזירה לפחות כמה גרסאות
+        # כמו שכבר פעילות. ריצה דלילה (פחות גרסאות מהקיים) לא מהימנה לכיבוי.
+        active_existing = sum(1 for t in existing_trims if t.get("Active", True))
+        comprehensive   = len(valid_trims) >= active_existing
+        if zoho_get_ok and vf["complete"] and not comprehensive:
+            log.info(f"     [deactivate] דילוג — שליפה דלילה ({len(valid_trims)} גרסאות < {active_existing} פעילות)")
+        if zoho_get_ok and vf["complete"] and comprehensive:
             for t in existing_trims:
                 if t.get("id") in resolved_ids:
                     continue
-                t_he = (t.get("Name") or "").strip().upper()
-                t_en = (t.get("Car_Finish_level_Name_EN") or "").strip().upper()
+                t_he = _strip_prefix((t.get("Name") or "").strip(), ptoks).upper()
+                t_en = _strip_prefix((t.get("Car_Finish_level_Name_EN") or "").strip(), ptoks).upper()
                 # Check both raw and normalised names
                 if (t_he in ai_he_set or _norm(t_he) in ai_he_set
                         or t_en in ai_en_set or _norm(t_en) in ai_en_set):

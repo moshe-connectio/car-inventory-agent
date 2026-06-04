@@ -118,25 +118,28 @@ def _disambiguate(trims: list[dict]) -> None:
 
 # ── Hebrew transliteration (AI, formatting only — never changes the grade) ───────
 
-def _transliterate(client: OpenAI, grades: list[str]) -> dict[str, str]:
-    uniq = sorted({g for g in grades if g})
-    if not uniq:
+def _is_code(tok: str) -> bool:
+    """A short all-caps / alphanumeric acronym with no Hebrew form (FR, VZ, GT, 1RS, EX)."""
+    alpha = re.sub(r"[^A-Za-z]", "", tok)
+    return bool(alpha) and not re.search(r"[a-z]", tok) and len(alpha) <= 4
+
+
+def _transliterate(client: OpenAI, words: list[str]) -> dict[str, str]:
+    """Transliterate ONLY real word-tokens to Hebrew (codes are handled deterministically)."""
+    if not words:
         return {}
-    listing = "\n".join(f"- {g}" for g in uniq)
-    prompt = f"""Transliterate these car trim-GRADE names to Hebrew letters.
+    listing = "\n".join(f"- {w}" for w in words)
+    prompt = f"""Transliterate each English car-trim word to Hebrew letters (phonetic).
+Examples: Premium→פרימיום, Comfort→קומפורט, Style→סטייל, Pro→פרו, Long→לונג,
+Executive→אקזקיוטיב, Performance→פרפורמנס, Design→דיזיין, Urban→אורבן, Pure→פיור,
+Ultimate→אולטימייט, Excellence→אקסלנס, Standard→סטנדרט, High→היי, Country→קאנטרי.
+Do NOT use double-quote characters in any value.
 
-- Pronounceable words → Hebrew letters: Premium→פרימיום, Comfort→קומפורט, Pro→פרו,
-  Long→לונג, Executive→אקזקיוטיב, Performance→פרפורמנס, Design→דיזיין, Urban→אורבן,
-  Ultimate→אולטימייט, Excellence→אקסלנס, Pure→פיור, Standard→סטנדרט.
-- Short codes / acronyms with no Hebrew form → KEEP IN LATIN exactly: VZ, GT, GTB, 1RS,
-  2RS, EX, ST, N-Line, GT-Line.
-- Do NOT use double-quote characters in any value.
-
-Grades:
+Words:
 {listing}
 
-Return ONLY JSON mapping each input grade to its Hebrew form:
-{{"map": {{"Premium": "פרימיום", "VZ": "VZ"}}}}"""
+Return ONLY JSON mapping each input word to its Hebrew form:
+{{"map": {{"Premium": "פרימיום"}}}}"""
     try:
         return parse_json(ai_call(client, prompt)).get("map", {}) or {}
     except Exception as e:
@@ -145,18 +148,23 @@ Return ONLY JSON mapping each input grade to its Hebrew form:
 
 
 def clean_trim_names(client: OpenAI, mfr_en: str, model_en: str, trims: list[dict]) -> None:
-    """Set deterministic English grade + Hebrew transliteration for each trim, in place."""
+    """Set deterministic English grade + Hebrew name (codes stay Latin) for each trim, in place."""
     if not trims:
         return
 
     raws   = [(t.get("name_he") or t.get("name_en") or "").strip() for t in trims]
     grades = [_sanitize(_extract_grade(r)) or "Standard" for r in raws]
-    he_map = _transliterate(client, grades)
+
+    # transliterate only the real words (codes like FR/VZ/1RS stay Latin — never sent to AI)
+    word_tokens = {tok for g in grades for tok in g.split() if not _is_code(tok)}
+    he_map = _transliterate(client, sorted(word_tokens))
 
     for i, t in enumerate(trims):
         g = grades[i]
         t["name_en"] = g
-        t["name_he"] = _sanitize(he_map.get(g, "")) or g     # Hebrew translit, else Latin grade
+        he_parts = [tok if _is_code(tok) else (_sanitize(he_map.get(tok, "")) or tok)
+                    for tok in g.split()]
+        t["name_he"] = " ".join(he_parts).strip() or g
         t["_raw"]    = raws[i]
 
     _disambiguate(trims)

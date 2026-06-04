@@ -290,6 +290,10 @@ def get_trims_ai(
         if repaired:
             log.info(f"  [trim-ai] {search_name}: מעבר תיקון מילא {repaired} שדות")
 
+    # clean, professional, bilingual trim names (grade only + fills the English name)
+    from .naming import clean_trim_names
+    clean_trim_names(client, mfr_en, model_en, trims)
+
     log.info(f"  [trim-ai] {search_name}: {len(trims)} גרסאות סופיות [{source}]")
     for t in trims:
         parts = [f"₪{t['price']:,}"]

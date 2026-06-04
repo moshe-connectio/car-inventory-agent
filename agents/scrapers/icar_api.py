@@ -258,15 +258,26 @@ def get_trims(mfr_en: str, mfr_he: str, model_en: str, model_he: str) -> list[di
             full = list(full.values())
         fv = _fields_values()
 
-        trims, seen = [], set()
+        # icar keeps a record per model-year; the PRICE lives only on the latest
+        # priced year. Group by trim name and keep the most-recent record that has a
+        # price, so every current trim gets its accurate current price.
+        best: dict[str, tuple[int, dict]] = {}
         for v in full:
-            t = _map_version(v, fv)
-            if not t or t["name_he"].upper() in seen:
+            name  = (v.get("version_name") or "").strip()
+            price = _num(v.get("price") or (v.get("identity") or {}).get("price"))
+            if not name or not price:
                 continue
-            seen.add(t["name_he"].upper())
-            trims.append(t)
+            yr = int(str((v.get("identity") or {}).get("year") or 0) or 0)
+            if name not in best or yr > best[name][0]:
+                best[name] = (yr, v)
 
-        log.info(f"[icar-api] {mfr_en} {model_en} → '{icar_name}': {len(trims)} גרסאות מ-icar")
+        trims = []
+        for _, v in best.values():
+            t = _map_version(v, fv)
+            if t:
+                trims.append(t)
+
+        log.info(f"[icar-api] {mfr_en} {model_en} → '{icar_name}': {len(trims)} גרסאות מ-icar (עם מחיר)")
         return trims
     except Exception as e:
         log.warning(f"[icar-api] נכשל עבור {mfr_en} {model_en}: {e}")

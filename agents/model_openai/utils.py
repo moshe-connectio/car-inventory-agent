@@ -121,24 +121,25 @@ def he_prefix_match(he_name: str, base: str) -> bool:
 
 
 def strip_manufacturer_prefix(name: str, mfr_en: str = "", mfr_he: str = "") -> str:
-    """Strip manufacturer name prefix from a model name.
+    """Strip a manufacturer-name prefix from a model name (case-insensitive).
 
-    e.g. 'ב.מ.וו X4' → 'X4', 'BMW X4' → 'X4', 'BYD Seal 5' → 'Seal 5'
-    Tries: Hebrew name, English name (original case), then case-insensitive English.
+    Tries the full English/Hebrew manufacturer names AND their first token, so a brand
+    whose registered name has a suffix is still stripped from the model name:
+      'ב.מ.וו X4' → 'X4', 'BMW X4' → 'X4', 'BYD Seal 5' → 'Seal 5',
+      'Im 5' (mfr 'IM Motors') → '5', 'Land Rover Defender' → 'Defender'.
+    Longest candidate is tried first so a full two-word brand wins over its first token.
     """
     if not name:
         return name
-    for pfx in filter(None, [
-        (mfr_he + " ") if mfr_he else None,
-        (mfr_en + " ") if mfr_en else None,
-        (mfr_en.upper() + " ") if mfr_en else None,
-    ]):
-        if name.startswith(pfx):
-            return name[len(pfx):]
-    if mfr_en:
-        lower_pfx = mfr_en.lower() + " "
-        if name.lower().startswith(lower_pfx):
-            return name[len(lower_pfx):]
+    cands: set[str] = set()
+    for m in (mfr_he, mfr_en):
+        m = (m or "").strip()
+        if m:
+            cands.add(m)
+            cands.add(m.split()[0])         # first token, e.g. 'IM Motors' → 'IM'
+    for pfx in sorted(cands, key=len, reverse=True):
+        if name.lower().startswith(pfx.lower() + " "):
+            return name[len(pfx) + 1:].strip()
     return name
 
 

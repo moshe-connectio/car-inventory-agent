@@ -292,7 +292,7 @@ def run(payload) -> dict:
         if not name_en and nm.get("image_url"):
             slug = _slug_to_base(nm["image_url"])
             if slug and all(c.isascii() for c in slug) and slug.strip():
-                name_en = slug.title()
+                name_en = strip_manufacturer_prefix(slug.title(), mfr_en, mfr_he)
                 nm["name_en"] = name_en
                 log.info(f"  [slug-en] extracted '{name_en}' from image slug")
 

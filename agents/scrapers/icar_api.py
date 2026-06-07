@@ -168,6 +168,95 @@ Return ONLY JSON: {{"match": "<exact Hebrew string from the list, or NONE>"}}"""
     return result
 
 
+# ── deterministic model-level facts (fuel / first-sold year / seats) from icar ───
+
+_FUEL_CATEGORY = ("חשמלי", "היברידי", "בנזין", "דיזל", "פלאג-אין היברידי")
+
+
+def _engine_to_fuel(engine_label: str) -> str:
+    """Map icar's decoded performance.engine to one canonical fuel category."""
+    s = engine_label or ""
+    if "נטען" in s:
+        return "פלאג-אין היברידי"
+    if "חשמלי" in s or "מימן" in s:
+        return "חשמלי"
+    if "היברידי" in s or "מיקרו" in s:
+        return "היברידי"
+    if "דיזל" in s:
+        return "דיזל"
+    if "בנזין" in s:
+        return "בנזין"
+    return ""
+
+
+def get_model_facts(mfr_en: str, mfr_he: str, model_en: str, model_he: str) -> dict:
+    """Deterministic model-level facts straight from icar (NO AI for the values):
+    {fuel, year_from, seats}. fuel = most-common engine fuel of the current line-up,
+    year_from = earliest launch year, seats = max seating. {} if the model isn't on icar
+    (caller keeps its existing values). Model match prefers an exact Hebrew-name hit."""
+    try:
+        mid = _mfr_id(mfr_en, mfr_he)
+        if not mid:
+            return {}
+        models = _current_models(mid)
+        if not models:
+            return {}
+        icar_name = None
+        for cand in (model_he, model_en):
+            c = (cand or "").strip()
+            if c and c in models:
+                icar_name = c
+                break
+        if not icar_name:
+            icar_name = _resolve_model_name(mfr_en, model_en, list(models.keys()), model_he)
+        if not icar_name:
+            return {}
+
+        d = _post("versions", {"versions": models[icar_name], "full": True})
+        full = d.get("data") or d
+        if isinstance(full, dict):
+            full = list(full.values())
+        fv = _fields_values()
+
+        launches: list[int] = []
+        years: list[int] = []
+        for v in full:
+            yz = str((v.get("identity") or {}).get("year") or "")
+            if yz.isdigit():
+                years.append(int(yz))
+            lz = str((v.get("identity") or {}).get("launch") or "")
+            if lz.isdigit():
+                launches.append(int(lz))
+        cur_year = max(years) if years else None
+
+        import collections
+        fuels: collections.Counter = collections.Counter()
+        seats: list[int] = []
+        for v in full:
+            ident = v.get("identity") or {}
+            if cur_year and str(ident.get("year") or "") != str(cur_year):
+                continue                                   # current line-up only for fuel/seats
+            perf = v.get("performance") or {}
+            f = _engine_to_fuel(_label(fv, "performance.engine", perf.get("engine")))
+            if f:
+                fuels[f] += 1
+            s = _seats_to_int(_label(fv, "identity.sitting", ident.get("sitting")))
+            if s:
+                seats.append(s)
+
+        facts: dict = {}
+        if fuels:
+            facts["fuel"] = fuels.most_common(1)[0][0]
+        if launches:
+            facts["year_from"] = str(min(launches))
+        if seats:
+            facts["seats"] = max(seats)
+        return facts
+    except Exception as e:
+        log.warning(f"[icar-api] get_model_facts נכשל עבור {mfr_en} {model_en}: {e}")
+        return {}
+
+
 # ── decode + field mapping ──────────────────────────────────────────────────────
 
 def _label(fv: dict, sect_field: str, code) -> str:

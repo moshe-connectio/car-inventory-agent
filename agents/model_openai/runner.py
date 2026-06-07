@@ -10,6 +10,37 @@ from .utils import CAR_TYPES, get_client, validate_record, strip_manufacturer_pr
 from .icar import get_israel_models, _he_prefix_match
 from .details import get_details
 from .images import get_image_carimagesapi, get_image_icar, is_stored_placeholder
+from .utils import clean_categories
+from ..scrapers import icar_api
+
+_FUEL_CATS = {"חשמלי", "היברידי", "פלאג-אין היברידי", "בנזין", "דיזל"}
+
+
+def _apply_icar_facts(record: dict, mfr_en: str, mfr_he: str,
+                      name_en: str, name_he: str) -> None:
+    """Override AI-guessed FACTUAL model fields with deterministic icar data: fuel
+    (Car_Type), first-sold year (Year_From), and the fuel/seat tags of Category. Body-shape
+    category tags (SUV/sedan…) stay — icar has no body type. Free-text Description is left to
+    the AI. No-op if the model can't be matched on icar."""
+    facts = icar_api.get_model_facts(mfr_en, mfr_he, name_en, name_he)
+    if not facts:
+        return
+    fuel = facts.get("fuel")
+    if fuel:
+        record["Car_Type"] = fuel
+    if facts.get("year_from"):
+        record["Year_From"] = facts["year_from"]
+    cats = [c for c in (record.get("Category") or []) if c not in _FUEL_CATS]
+    if fuel and fuel not in cats:
+        cats.append(fuel)
+    if facts.get("seats", 0) and facts["seats"] >= 7:
+        if "7 מושבים" not in cats:
+            cats.append("7 מושבים")
+    else:
+        cats = [c for c in cats if c != "7 מושבים"]
+    record["Category"] = clean_categories(cats)
+    log.info(f"  [icar-facts] {name_en or name_he}: דלק={record.get('Car_Type')} "
+             f"שנה={record.get('Year_From')} קטגוריה={record.get('Category')}")
 
 log = logging.getLogger(__name__)
 
@@ -318,6 +349,8 @@ def run(payload) -> dict:
         record = get_details(client, mfr_en, name_en, name_he, mfr_id)
         name_en = record.get("Name", name_en)
         name_he = record.get("Car_Model_Name_HE", name_he)
+        # deterministic icar facts override AI guesses for fuel / year / fuel+seat category
+        _apply_icar_facts(record, mfr_en, mfr_he, name_en, name_he)
         issues = validate_record(record)
         if issues:
             log.warning(f"  ⚠ {name_en} ולידציה: {issues}")

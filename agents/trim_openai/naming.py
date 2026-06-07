@@ -1,27 +1,28 @@
 """
 agents/trim_openai/naming.py
-Clean, professional, bilingual trim-level names — accurate, no invented grades.
+Clean, professional, bilingual trim-level names — accurate, DETERMINISTIC, no invented data.
 
-The English grade is extracted DETERMINISTICALLY from icar's raw version string (the Latin
-tokens, dropping engine displacement, fuel/battery words, drivetrain codes and Hebrew spec
-text). This is the source of truth — the AI never reinterprets it (icar "2.0 300 כ\"ס VZ"
-→ grade "VZ", never "GT").
+Both names come straight from icar's raw version string (e.g. "1.6 טורבו-בנזין Premium"),
+with NO AI involved:
 
-The AI is used ONLY to transliterate that exact grade to Hebrew for the Name field
-(Premium→פרימיום); short codes/acronyms (VZ, GT, 1RS, EX, GTB) stay Latin. When two trims
+  • name_en (Car_Finish_level_Name_EN) — the Latin grade tokens only (Premium, M-Sport, RS,
+    M240i xDrive…); engine displacement, fuel/spec words, units and drivetrain codes dropped.
+  • name_he (Name) — the same grade PLUS any meaningful Hebrew descriptor icar provides
+    (חשמלי, הנעה כפולה, and rare Hebrew grade names like פרימיום/סטינגריי). Hebrew *spec*
+    words (טורבו-בנזין, כ"ס, ספורטבק, טון…) are dropped via _HE_SPEC_DROP.
+
+icar does NOT supply Hebrew grade names — grades are Latin — so per the product decision the
+Hebrew name keeps real words in English; only genuine Hebrew from icar survives. When two trims
 of a model share a grade, the differing attribute (fuel → engine → drivetrain) is appended,
 in Hebrew on name_he and English on name_en.
 """
 import logging
 import re
 
-from openai import OpenAI
-
-from ..model_openai.utils import ai_call, parse_json
-
 log = logging.getLogger(__name__)
 
 _DRIVETRAIN_CODE = re.compile(r"^[24][xX×][24]$")        # 2x4 / 4x4 / 2X4
+_NUM = re.compile(r"^\d+([.,]\d+)?$")                     # 1.6 / 400 / 116 / 4,117
 _FUEL_PATS = [
     ("PHEV",   r"נטען|plug"),
     ("EV",     r"חשמלי|\bEV\b"),
@@ -33,30 +34,48 @@ _FUEL_HE = {"PHEV": "היברידי נטען", "EV": "חשמלי", "Hybrid": "ה
             "Diesel": "דיזל", "Petrol": "בנזין"}
 _DT_EN = {"4X4": "AWD", "קדמית": "FWD", "אחורית": "RWD"}
 
+# Hebrew SPEC words to drop from names (engine/fuel/transmission/body/dimension). Everything
+# else Hebrew is a meaningful descriptor and is KEPT (חשמלי, הנעה, כפולה, אחורית, קדמית,
+# פרימיום, סטינגריי, טק…). Derived from a scan of all ~2036 current icar version names.
+_HE_SPEC_DROP = {
+    # דלק / מנוע
+    "טורבו-בנזין", "טורבו-דיזל", "בנזין", "דיזל", "טורבו", "היברידי", "היברידי-נטען",
+    "מיקרו-היברידי", "פלאג-אין", "סוללת",
+    # תיבת הילוכים
+    "אוט'", "אוטו'", "ידני", "רובוטית", "כפולת", "מצמדים", "גיר",
+    # מרכב / מידות / מושבים
+    "מושבים", "מקומות", "נוסעים", "ארוך", "קצר", "גבוה", "נמוך", "בינוני", "סופר",
+    "סופר-ארוך", "סופר-גבוה", "קבינה", "חד-קבינה", "חד", "דאבל", "דאבל-קבינה", "מורחבת",
+    "קופה", "קבריולה", "סדאן", "ספורטבק", "קומבי", "ואן", "מולטיוואן", "מסחרי", "טנדר",
+    "גג", "גובה", "אורך", "משקל", "משלוח", "חישוקי", "מקסי", "קומפקט", "רציף", "סגור",
+    "מאוד", "רגיל", "אוואנט", "טון",
+}
 
-# ── deterministic grade extraction from icar's raw version_name ──────────────────
 
-def _extract_grade(raw: str) -> str:
-    """
-    Keep only the Latin grade tokens from an icar version string.
-    Drops displacement (2.0), counts (300), Hebrew spec words (טורבו-בנזין, כ"ס, סוללת),
-    and drivetrain codes (2X4/4X4). e.g. "2.0 טורבו-בנזין 333 כ\"ס VZ 4X4" → "VZ".
-    """
-    out = []
-    for tok in (raw or "").split():
-        if re.fullmatch(r"\d+(\.\d+)?", tok):        # pure number / displacement
-            continue
-        if _DRIVETRAIN_CODE.match(tok):              # 2X4 / 4X4
-            continue
-        if re.search(r"[א-ת]", tok):                 # any Hebrew → spec text, not grade
-            continue
-        if re.search(r"[A-Za-z]", tok):              # a Latin grade token (VZ, 1RS, Premium…)
-            out.append(tok.strip("-"))
-    return " ".join(out).strip()
+# ── deterministic name extraction from icar's raw version_name ────────────────────
+
+def _keep_en(tok: str) -> bool:
+    """A Latin grade token (Premium, M-Sport, RS, M240i…) — drops numbers, Hebrew, DT codes."""
+    if _NUM.match(tok) or _DRIVETRAIN_CODE.match(tok):
+        return False
+    if re.search(r"[א-ת]", tok):
+        return False
+    return bool(re.search(r"[A-Za-z]", tok))
+
+
+def _keep_he(tok: str) -> bool:
+    """For the Hebrew Name: keep Latin grade tokens AND meaningful Hebrew (not spec words)."""
+    if _NUM.match(tok) or _DRIVETRAIN_CODE.match(tok):
+        return False
+    if re.search(r"[א-ת]", tok):
+        if '"' in tok:                               # a unit token (כ"ס, ק"מ, קוט"ש…)
+            return False
+        return tok not in _HE_SPEC_DROP
+    return bool(re.search(r"[A-Za-z]", tok))         # a Latin grade token
 
 
 def _sanitize(s: str) -> str:
-    """Strip JSON/quote artifacts that can leak from AI output."""
+    """Strip stray quote/bracket artifacts and collapse whitespace."""
     s = re.sub(r'["“”{}\[\]\\]', "", s or "")
     s = re.sub(r"\s+", " ", s).strip(" -,'")
     return s
@@ -101,12 +120,12 @@ def _disambiguate(trims: list[dict]) -> None:
         taggers = [fn for fn in (_tag_fuel, _tag_liters, _tag_dt)
                    if len({fn(t)[0] for t in group}) > 1]
         for t in group:
-            en_extra = " ".join(filter(None, (fn(t)[0] for fn in taggers)))
-            he_extra = " ".join(filter(None, (fn(t)[1] for fn in taggers)))
-            if en_extra:
-                t["name_en"] = f"{t['name_en']} {en_extra}".strip()
-            if he_extra:
-                t["name_he"] = f"{t['name_he']} {he_extra}".strip()
+            for fn in taggers:
+                en, he = fn(t)
+                if en and en not in t["name_en"]:
+                    t["name_en"] = f"{t['name_en']} {en}".strip()
+                if he and he not in t["name_he"]:     # skip if icar already supplied it
+                    t["name_he"] = f"{t['name_he']} {he}".strip()
         seen: dict[str, int] = {}
         for t in group:
             key = t["name_en"].upper()
@@ -116,56 +135,21 @@ def _disambiguate(trims: list[dict]) -> None:
                 t["name_he"] += f" {seen[key]}"
 
 
-# ── Hebrew transliteration (AI, formatting only — never changes the grade) ───────
+# ── public entry point (deterministic — no AI, no client) ────────────────────────
 
-def _is_code(tok: str) -> bool:
-    """A short all-caps / alphanumeric acronym with no Hebrew form (FR, VZ, GT, 1RS, EX)."""
-    alpha = re.sub(r"[^A-Za-z]", "", tok)
-    return bool(alpha) and not re.search(r"[a-z]", tok) and len(alpha) <= 4
-
-
-def _transliterate(client: OpenAI, words: list[str]) -> dict[str, str]:
-    """Transliterate ONLY real word-tokens to Hebrew (codes are handled deterministically)."""
-    if not words:
-        return {}
-    listing = "\n".join(f"- {w}" for w in words)
-    prompt = f"""Transliterate each English car-trim word to Hebrew letters (phonetic).
-Examples: Premium→פרימיום, Comfort→קומפורט, Style→סטייל, Pro→פרו, Long→לונג,
-Executive→אקזקיוטיב, Performance→פרפורמנס, Design→דיזיין, Urban→אורבן, Pure→פיור,
-Ultimate→אולטימייט, Excellence→אקסלנס, Standard→סטנדרט, High→היי, Country→קאנטרי.
-Do NOT use double-quote characters in any value.
-
-Words:
-{listing}
-
-Return ONLY JSON mapping each input word to its Hebrew form:
-{{"map": {{"Premium": "פרימיום"}}}}"""
-    try:
-        return parse_json(ai_call(client, prompt)).get("map", {}) or {}
-    except Exception as e:
-        log.warning(f"  [naming] תעתוק נכשל: {e}")
-        return {}
-
-
-def clean_trim_names(client: OpenAI, mfr_en: str, model_en: str, trims: list[dict]) -> None:
-    """Set deterministic English grade + Hebrew name (codes stay Latin) for each trim, in place."""
+def clean_trim_names(mfr_en: str, model_en: str, trims: list[dict]) -> None:
+    """Set deterministic bilingual names for each trim, in place — straight from icar."""
     if not trims:
         return
 
-    raws   = [(t.get("name_he") or t.get("name_en") or "").strip() for t in trims]
-    grades = [_sanitize(_extract_grade(r)) or "Standard" for r in raws]
-
-    # transliterate only the real words (codes like FR/VZ/1RS stay Latin — never sent to AI)
-    word_tokens = {tok for g in grades for tok in g.split() if not _is_code(tok)}
-    he_map = _transliterate(client, sorted(word_tokens))
-
-    for i, t in enumerate(trims):
-        g = grades[i]
-        t["name_en"] = g
-        he_parts = [tok if _is_code(tok) else (_sanitize(he_map.get(tok, "")) or tok)
-                    for tok in g.split()]
-        t["name_he"] = " ".join(he_parts).strip() or g
-        t["_raw"]    = raws[i]
+    for t in trims:
+        raw  = (t.get("name_he") or t.get("name_en") or "").strip()
+        toks = raw.split()
+        en = _sanitize(" ".join(tok for tok in toks if _keep_en(tok)).strip(" -"))
+        he = _sanitize(" ".join(tok for tok in toks if _keep_he(tok)).strip(" -"))
+        t["name_en"] = en or "Standard"
+        t["name_he"] = he or t["name_en"]            # empty → fall back to the English grade
+        t["_raw"]    = raw
 
     _disambiguate(trims)
     for t in trims:

@@ -7,8 +7,9 @@ Every price and spec comes straight from icar.co.il's internal JSON API
 deterministically, so the previous LLM web-search path was removed entirely: if a model
 is not found on icar we return nothing rather than risk inventing prices/specs.
 
-The only AI use left is naming.py, which transliterates icar's OWN grade names to Hebrew —
-it never fabricates any data value.
+Trim naming (naming.py) is now fully deterministic — both names are derived straight from
+icar's own version string with no AI. The only remaining AI use is the constrained
+English→Hebrew model-name match inside icar_api (cached), never any data value.
 """
 import logging
 
@@ -38,9 +39,9 @@ def get_trims_ai(
         log.info(f"  [trim-ai] {search_name}: לא נמצא ב-icar — מדלג (ללא המצאת נתונים)")
         return []
 
-    # clean, professional, bilingual names (transliterates icar's grade — no data invented)
+    # clean, professional, bilingual names — deterministic from icar's grade (no AI)
     from .naming import clean_trim_names
-    clean_trim_names(client, mfr_en, model_en, trims)
+    clean_trim_names(mfr_en, model_en, trims)
 
     log.info(f"  [trim-ai] {search_name}: {len(trims)} גרסאות סופיות [icar]")
     for t in trims:

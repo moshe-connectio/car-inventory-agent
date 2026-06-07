@@ -23,15 +23,16 @@ log = logging.getLogger(__name__)
 
 _DRIVETRAIN_CODE = re.compile(r"^[24][xX×][24]$")        # 2x4 / 4x4 / 2X4
 _NUM = re.compile(r"^\d+([.,]\d+)?$")                     # 1.6 / 400 / 116 / 4,117
-_FUEL_PATS = [
-    ("PHEV",   r"נטען|plug"),
-    ("EV",     r"חשמלי|\bEV\b"),
-    ("Hybrid", r"היבריד|hybrid|מיקרו"),
-    ("Diesel", r"דיזל|diesel"),
-    ("Petrol", r"בנזין|petrol|טורבו"),
-]
-_FUEL_HE = {"PHEV": "היברידי נטען", "EV": "חשמלי", "Hybrid": "היברידי",
-            "Diesel": "דיזל", "Petrol": "בנזין"}
+# Map the authoritative icar fuel (trim["fuel"]) → (English tag, Hebrew tag) for
+# disambiguation. Uses the SAME value as the Fuel_Type field, so a name never disagrees
+# with the fuel (e.g. a mild-hybrid petrol is never tagged "היברידי").
+_FUEL_TAG = {
+    "בנזין":            ("Petrol", "בנזין"),
+    "דיזל":             ("Diesel", "דיזל"),
+    "היברידי":          ("Hybrid", "היברידי"),
+    "פלאג-אין היברידי": ("PHEV",   "היברידי נטען"),
+    "חשמלי":            ("EV",     "חשמלי"),
+}
 _DT_EN = {"4X4": "AWD", "קדמית": "FWD", "אחורית": "RWD"}
 
 # Hebrew SPEC words to drop from names (engine/fuel/transmission/body/dimension). Everything
@@ -83,18 +84,6 @@ def _sanitize(s: str) -> str:
 
 # ── disambiguation helpers ──────────────────────────────────────────────────────
 
-def _fuel(t: dict) -> str:
-    raw = t.get("_raw") or ""
-    for label, pat in _FUEL_PATS:
-        if re.search(pat, raw, re.I):
-            return label
-    if t.get("battery_kwh") and not t.get("engine_cc"):
-        return "EV"
-    if t.get("battery_kwh") and t.get("engine_cc"):
-        return "Hybrid"
-    return ""
-
-
 def _liters(t: dict) -> str:
     cc = t.get("engine_cc")
     if not cc:
@@ -105,7 +94,7 @@ def _liters(t: dict) -> str:
         return ""
 
 
-def _tag_fuel(t):    f = _fuel(t);   return (f, _FUEL_HE.get(f, f))
+def _tag_fuel(t):    return _FUEL_TAG.get(t.get("fuel") or "", ("", ""))  # authoritative icar fuel
 def _tag_liters(t):  l = _liters(t); return (l, l)
 def _tag_dt(t):      d = t.get("drivetrain") or ""; return (_DT_EN.get(d, ""), d)
 
@@ -144,8 +133,9 @@ def _tag_power(t):
 
 
 # Priority order for disambiguating same-grade trims by a REAL differing attribute.
-# (Never a bare counter — if two trims differ, the difference must be a real spec.)
-_TAGGERS = [_tag_fuel, _tag_dt, _tag_liters, _tag_seats, _tag_battery, _tag_power]
+# Engine (fuel → displacement) first, then drivetrain, power, seats, battery. Never a bare
+# counter — if two trims differ, the difference must be a real spec.
+_TAGGERS = [_tag_fuel, _tag_liters, _tag_dt, _tag_power, _tag_seats, _tag_battery]
 
 
 def _disambiguate(trims: list[dict]) -> list[dict]:

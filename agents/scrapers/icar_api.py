@@ -87,6 +87,15 @@ def _mfr_id(mfr_en: str, mfr_he: str) -> int | None:
     return None
 
 
+def manufacturer_on_icar(mfr_en: str, mfr_he: str) -> bool:
+    """True if the manufacturer exists on icar — so a missing model is a match gap,
+    not genuine absence (only absence justifies the gov.il fallback)."""
+    try:
+        return _mfr_id(mfr_en, mfr_he) is not None
+    except Exception:
+        return False
+
+
 def _is_current(row: dict) -> bool:
     iy = str(row.get("identity_year") or "")
     ye = str(row.get("year_end") or "").strip()

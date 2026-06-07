@@ -105,34 +105,95 @@ def _liters(t: dict) -> str:
         return ""
 
 
-def _tag_fuel(t):   f = _fuel(t);   return (f, _FUEL_HE.get(f, f))
-def _tag_liters(t): l = _liters(t); return (l, l)
-def _tag_dt(t):     d = t.get("drivetrain") or ""; return (_DT_EN.get(d, ""), d)
+def _tag_fuel(t):    f = _fuel(t);   return (f, _FUEL_HE.get(f, f))
+def _tag_liters(t):  l = _liters(t); return (l, l)
+def _tag_dt(t):      d = t.get("drivetrain") or ""; return (_DT_EN.get(d, ""), d)
 
 
-def _disambiguate(trims: list[dict]) -> None:
-    groups: dict[str, list[dict]] = {}
+def _tag_seats(t):
+    s = t.get("seats")
+    if not s:
+        return ("", "")
+    try:
+        n = int(s)
+    except (TypeError, ValueError):
+        return ("", "")
+    return (f"{n} Seats", f"{n} מושבים")
+
+
+def _tag_battery(t):
+    b = t.get("battery_kwh")
+    if not b:
+        return ("", "")
+    try:
+        v = f"{int(round(float(b)))}kWh"
+    except (TypeError, ValueError):
+        return ("", "")
+    return (v, v)
+
+
+def _tag_power(t):
+    h = t.get("hp")
+    if not h:
+        return ("", "")
+    try:
+        n = int(float(h))
+    except (TypeError, ValueError):
+        return ("", "")
+    return (f"{n}hp", f'{n} כ"ס')
+
+
+# Priority order for disambiguating same-grade trims by a REAL differing attribute.
+# (Never a bare counter — if two trims differ, the difference must be a real spec.)
+_TAGGERS = [_tag_fuel, _tag_dt, _tag_liters, _tag_seats, _tag_battery, _tag_power]
+
+
+def _disambiguate(trims: list[dict]) -> list[dict]:
+    """Make trim names unique using real differing attributes, in priority order.
+
+    Each language is uniquified independently: a tag is appended only to the language that
+    actually collides (so when icar's Hebrew already separates two trims, e.g.
+    'הנעה אחורית' vs 'הנעה כפולה', no redundant tag is added). Tags are real attributes
+    (fuel → drivetrain → engine size → seats → battery → power) — never a bare counter.
+    Trims identical on every real attribute are true duplicates and are collapsed to one
+    (lowest real price). Returns the de-duplicated list.
+    """
+    def uniquify(field: str, idx: int) -> None:
+        groups: dict[str, list[dict]] = {}
+        for t in trims:
+            groups.setdefault((t.get(field) or "").strip().upper(), []).append(t)
+        for group in groups.values():
+            if len(group) < 2:
+                continue
+            for fn in _TAGGERS:
+                if len({(t[field] or "").strip().upper() for t in group}) == len(group):
+                    break                                   # already fully distinct
+                if len({fn(t)[idx] for t in group}) <= 1:
+                    continue                                # doesn't separate this group
+                for t in group:
+                    tag = fn(t)[idx]
+                    if tag and tag not in t[field]:
+                        t[field] = f"{t[field]} {tag}".strip()
+
+    uniquify("name_en", 0)
+    uniquify("name_he", 1)
+
+    # collapse true duplicates (identical en+he after tagging) — keep the lowest real price
+    out: list[dict] = []
+    seen: dict[tuple, dict] = {}
     for t in trims:
-        groups.setdefault((t.get("name_en") or "").strip().upper(), []).append(t)
-    for group in groups.values():
-        if len(group) < 2:
-            continue
-        taggers = [fn for fn in (_tag_fuel, _tag_liters, _tag_dt)
-                   if len({fn(t)[0] for t in group}) > 1]
-        for t in group:
-            for fn in taggers:
-                en, he = fn(t)
-                if en and en not in t["name_en"]:
-                    t["name_en"] = f"{t['name_en']} {en}".strip()
-                if he and he not in t["name_he"]:     # skip if icar already supplied it
-                    t["name_he"] = f"{t['name_he']} {he}".strip()
-        seen: dict[str, int] = {}
-        for t in group:
-            key = t["name_en"].upper()
-            seen[key] = seen.get(key, 0) + 1
-            if seen[key] > 1:
-                t["name_en"] += f" {seen[key]}"
-                t["name_he"] += f" {seen[key]}"
+        key = ((t.get("name_en") or "").strip().upper(),
+               (t.get("name_he") or "").strip().upper())
+        if key not in seen:
+            seen[key] = t
+            out.append(t)
+        else:
+            kept = seen[key]
+            kp, tp = kept.get("price") or 0, t.get("price") or 0
+            if tp and (not kp or tp < kp):
+                out[out.index(kept)] = t
+                seen[key] = t
+    return out
 
 
 # ── public entry point (deterministic — no AI, no client) ────────────────────────
@@ -151,7 +212,7 @@ def clean_trim_names(mfr_en: str, model_en: str, trims: list[dict]) -> None:
         t["name_he"] = he or t["name_en"]            # empty → fall back to the English grade
         t["_raw"]    = raw
 
-    _disambiguate(trims)
+    trims[:] = _disambiguate(trims)         # unique names + collapse true duplicates, in place
     for t in trims:
         t.pop("_raw", None)
     log.info(f"  [naming] {model_en}: " +

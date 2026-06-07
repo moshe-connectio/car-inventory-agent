@@ -35,16 +35,23 @@ def validate_trim(trim: dict) -> tuple[bool, list[str]]:
     if not name_he:
         return False, ["name_he ריק"]
 
-    # ── fatal: price present, numeric, in range ───────────────────
-    price = trim.get("price")
-    lo, hi = SANITY["price"]
-    if not isinstance(price, (int, float)) or not (lo <= price <= hi):
-        return False, [f"מחיר לא תקין: {price!r}"]
-
-    # ── fatal: approved price source ──────────────────────────────
+    # ── fatal: approved source ────────────────────────────────────
     src = (trim.get("source_url") or "").lower()
     if not any(s in src for s in APPROVED_SOURCES):
-        return False, [f"מקור מחיר לא מאושר: {src!r}"]
+        return False, [f"מקור לא מאושר: {src!r}"]
+
+    # ── fatal: price ──────────────────────────────────────────────
+    # icar/auto ARE pricing sources → an in-range price is mandatory. gov.il has no
+    # prices (fallback for manufacturers absent from icar) → a missing price is allowed
+    # and the field stays empty; but if a price IS present it must still be sane.
+    price    = trim.get("price")
+    gov_only = "gov.il" in src and "icar.co.il" not in src and "auto.co.il" not in src
+    lo, hi   = SANITY["price"]
+    if price is None or price == "":
+        if not gov_only:
+            return False, ["מחיר חסר ממקור תמחור"]
+    elif not isinstance(price, (int, float)) or not (lo <= price <= hi):
+        return False, [f"מחיר לא תקין: {price!r}"]
 
     # ── non-fatal: drivetrain normalisation ───────────────────────
     if trim.get("drivetrain"):

@@ -36,8 +36,18 @@ def get_trims_ai(
     trims = icar_api.get_trims(mfr_en, mfr_he, model_en, model_he)
 
     if not trims:
-        log.info(f"  [trim-ai] {search_name}: לא נמצא ב-icar — מדלג (ללא המצאת נתונים)")
-        return []
+        # icar is the primary source. Fall back to gov.il ONLY when the manufacturer is
+        # genuinely absent from icar — if the manufacturer IS on icar, an empty result is a
+        # model-match gap and we skip rather than fabricate from a thinner source.
+        if icar_api.manufacturer_on_icar(mfr_en, mfr_he):
+            log.info(f"  [trim-ai] {search_name}: יצרן ב-icar אך דגם לא הותאם — מדלג (ללא המצאת נתונים)")
+            return []
+        from ..scrapers import gov_api
+        log.info(f"  [trim-ai] {search_name}: יצרן לא קיים ב-icar — נופל ל-gov.il")
+        trims = gov_api.get_trims(mfr_en, mfr_he, model_en, model_he)
+        if not trims:
+            log.info(f"  [trim-ai] {search_name}: לא נמצא גם ב-gov.il — מדלג")
+            return []
 
     # clean, professional, bilingual names — deterministic from icar's grade (no AI)
     from .naming import clean_trim_names

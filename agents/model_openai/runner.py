@@ -288,13 +288,29 @@ def run(payload) -> dict:
         name_en = nm.get("name_en", "")
         name_he = nm.get("name_he", "")
 
-        # Pre-extract English from icar image slug when name_en is missing
-        if not name_en and nm.get("image_url"):
-            slug = _slug_to_base(nm["image_url"])
-            if slug and all(c.isascii() for c in slug) and slug.strip():
-                name_en = strip_manufacturer_prefix(slug.title(), mfr_en, mfr_he)
+        # Resolve the English model name when icar gave only Hebrew.
+        if not name_en:
+            nm_he = (name_he or "").strip()
+            if nm_he and nm_he.isascii():
+                # numeric/Latin model identifier (e.g. RAM "2500"/"3500") — already
+                # language-neutral; use it directly so the name is the MODEL, not the brand.
+                name_en = nm_he
                 nm["name_en"] = name_en
-                log.info(f"  [slug-en] extracted '{name_en}' from image slug")
+                log.info(f"  [model-name] numeric model id → '{name_en}'")
+            elif nm.get("image_url"):
+                slug = _slug_to_base(nm["image_url"])
+                if slug and all(c.isascii() for c in slug) and slug.strip():
+                    cand = strip_manufacturer_prefix(slug.title(), mfr_en, mfr_he)
+                    brand_forms = {mfr_en.strip().lower(), (mfr_he or "").strip().lower()}
+                    if mfr_en.strip():
+                        brand_forms.add(mfr_en.strip().split()[0].lower())
+                    # accept the slug name only if it's a real model — never the brand itself
+                    if cand and cand.strip() and cand.strip().lower() not in brand_forms:
+                        name_en = cand
+                        nm["name_en"] = name_en
+                        log.info(f"  [slug-en] extracted '{name_en}' from image slug")
+                    else:
+                        log.info(f"  [slug-en] slug '{slug}' = שם יצרן בלבד — משאיר לחילוץ מהעברית")
 
         label   = name_en or name_he
         log.info(f"[build] {label}...")

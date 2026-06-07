@@ -111,16 +111,29 @@ def _current_models(mfr_id: int) -> dict[str, list[int]]:
     return out
 
 
-def _resolve_model_name(mfr_en: str, model_en: str, candidates: list[str]) -> str | None:
-    """Pick the icar Hebrew model name matching the English model name.
+def _resolve_model_name(mfr_en: str, model_en: str, candidates: list[str],
+                        model_he: str = "") -> str | None:
+    """Pick the icar model name matching this model.
 
-    Constrained choice from a short per-manufacturer list — reliable (unlike open
-    enumeration). Cached per (mfr_en, model_en).
+    First a deterministic exact match of the model identifier (model_he or model_en)
+    against the candidate list — this handles numeric/identifier model names like RAM
+    "2500"/"3500", where the English name is just the brand and the AI cannot match.
+    Falls back to a constrained AI pick (cached per mfr_en|model_en) only when needed.
     """
     if not candidates:
         return None
     if len(candidates) == 1:
         return candidates[0]
+
+    # deterministic exact match — no AI, no false positives
+    def _norm(s: str) -> str:
+        return re.sub(r"\s+", " ", (s or "").strip()).lower()
+    by_norm = {_norm(c): c for c in candidates}
+    for probe in (model_he, model_en):
+        hit = by_norm.get(_norm(probe))
+        if hit:
+            return hit
+
     key = f"{mfr_en}|{model_en}".lower()
     if key in _cache["models"]:
         return _cache["models"][key]
@@ -246,7 +259,7 @@ def get_trims(mfr_en: str, mfr_he: str, model_en: str, model_he: str) -> list[di
         models = _current_models(mid)
         if not models:
             return []
-        icar_name = _resolve_model_name(mfr_en, model_en, list(models.keys()))
+        icar_name = _resolve_model_name(mfr_en, model_en, list(models.keys()), model_he)
         if not icar_name:
             log.info(f"[icar-api] דגם לא הותאם ב-icar: {mfr_en} {model_en}")
             return []

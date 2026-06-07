@@ -217,7 +217,10 @@ def run(payload) -> dict:
 
         # ── AI fetch ───────────────────────────────────────
         try:
-            ai_trims = get_trims_ai(client, mfr_en, mfr_he, model_en, model_he)
+            # pass the RAW model identifier (e.g. "2500"/"3500") for icar matching — the
+            # Hebrew-filtered model_he is blanked for numeric model names. (model_he stays
+            # filtered for prefix-stripping/logging above.)
+            ai_trims = get_trims_ai(client, mfr_en, mfr_he, model_en, model_he_raw or model_he)
         except Exception as e:
             log.error(f"  [trim-runner] שגיאת AI עבור {model_en}: {e}")
             stats["errors"] += 1

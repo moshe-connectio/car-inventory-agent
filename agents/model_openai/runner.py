@@ -31,8 +31,9 @@ def _apply_icar_facts(record: dict, mfr_en: str, mfr_he: str,
     if facts.get("year_from"):
         record["Year_From"] = facts["year_from"]
     cats = [c for c in (record.get("Category") or []) if c not in _FUEL_CATS]
-    if fuel and fuel not in cats:
-        cats.append(fuel)
+    for f in (facts.get("fuels") or ([fuel] if fuel else [])):
+        if f and f not in cats:
+            cats.append(f)        # all fuels actually offered (e.g. mixed petrol+hybrid model)
     if facts.get("seats", 0) and facts["seats"] >= 7:
         if "7 מושבים" not in cats:
             cats.append("7 מושבים")

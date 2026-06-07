@@ -174,13 +174,19 @@ _FUEL_CATEGORY = ("חשמלי", "היברידי", "בנזין", "דיזל", "פ�
 
 
 def _engine_to_fuel(engine_label: str) -> str:
-    """Map icar's decoded performance.engine to one canonical fuel category."""
+    """Map icar's decoded performance.engine to one canonical fuel category.
+
+    Mild-hybrid (מיקרו-היברידי) is classified by its base fuel (בנזין/דיזל), not as a
+    hybrid — only a full hybrid (היברידי, no מיקרו) or plug-in (נטען) counts as hybrid.
+    """
     s = engine_label or ""
     if "נטען" in s:
         return "פלאג-אין היברידי"
     if "חשמלי" in s or "מימן" in s:
         return "חשמלי"
-    if "היברידי" in s or "מיקרו" in s:
+    if "מיקרו" in s:                                  # mild hybrid = its base fuel
+        return "דיזל" if "דיזל" in s else "בנזין"
+    if "היברידי" in s:                                # full hybrid
         return "היברידי"
     if "דיזל" in s:
         return "דיזל"
@@ -246,7 +252,8 @@ def get_model_facts(mfr_en: str, mfr_he: str, model_en: str, model_he: str) -> d
 
         facts: dict = {}
         if fuels:
-            facts["fuel"] = fuels.most_common(1)[0][0]
+            facts["fuel"] = fuels.most_common(1)[0][0]          # primary (most common)
+            facts["fuels"] = [f for f, _ in fuels.most_common()]  # all offered, for Category
         if launches:
             facts["year_from"] = str(min(launches))
         if seats:
@@ -318,6 +325,7 @@ def _map_version(v: dict, fv: dict) -> dict | None:
         "price_source":     "icar",
         "source_url":       "https://www.icar.co.il" + (v.get("url") or ""),
         "spec_source_url":  "https://www.icar.co.il" + (v.get("url") or ""),
+        "fuel":             _engine_to_fuel(_label(fv, "performance.engine", perf.get("engine"))) or None,
         "hp":               _num(perf.get("power")),
         "engine_cc":        _num(perf.get("capacity")),
         "torque_nm":        int(round(moment * 9.80665)) if moment else None,

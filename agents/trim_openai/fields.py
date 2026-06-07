@@ -51,6 +51,7 @@ FIELD_SPECS: list[tuple[str, str, callable]] = [
     ("Torque_Nm",        "torque_nm",        _int),
     ("Transmission",     "transmission",     _str),
     ("Drivetrain",       "drivetrain",       _str),
+    ("Fuel_Type",        "fuel",             _str),
     ("Battery_kwh",      "battery_kwh",      _float),
     ("Charging_kw",      "charging_kw",      _int),
     ("Fuel_Consumption", "fuel_consumption", _float),

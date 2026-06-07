@@ -2,7 +2,9 @@
 agents/model_openai/images.py
 Pulse 3: car image lookup (icar bgremoval primary, auto.co.il secondary).
 """
+import hashlib
 import logging
+import os
 import re
 
 import httpx
@@ -13,6 +15,12 @@ from .utils import ai_call
 log = logging.getLogger(__name__)
 
 _BAD_FNAMES = ("logo", "badge", "emblem", "icon", "flag", "mandir", "temple")
+
+# carimagesapi serves a generic "covered car" PLACEHOLDER when it has no real image for a
+# model (its HEAD is unsupported → 404, so the placeholder must be detected on the downloaded
+# bytes). Real car renders are ~300KB+; the placeholder is exactly this md5 / ~110KB.
+_PLACEHOLDER_MD5 = {"c27d4340d96194bb625ef85fd6c2c4aa"}
+_CARIMAGES_MIN_BYTES = 120_000
 
 _BROWSER_HEADERS = {
     "User-Agent": (
@@ -97,23 +105,49 @@ def scrape_auto_co_il_image(mfr_en: str, name_en: str) -> str:
         return ""
 
 
-def _download_and_store(url: str, filename: str) -> str:
-    """Downloads image from URL, saves to IMAGES_DIR, returns permanent local URL."""
-    import os
+def _store_bytes(content: bytes, filename: str) -> str:
+    """Saves image bytes to IMAGES_DIR, returns permanent local URL."""
     images_dir  = os.environ.get("IMAGES_DIR", "/var/www/car-images")
     images_base = os.environ.get("IMAGES_BASE_URL", "https://images.gsmdev.co.il/car-images")
     os.makedirs(images_dir, exist_ok=True)
-    path = os.path.join(images_dir, filename)
-    resp = httpx.get(url, timeout=15)
-    resp.raise_for_status()
-    with open(path, "wb") as f:
-        f.write(resp.content)
+    with open(os.path.join(images_dir, filename), "wb") as f:
+        f.write(content)
     return f"{images_base}/{filename}"
 
 
+def _download_and_store(url: str, filename: str) -> str:
+    """Downloads image from URL, saves to IMAGES_DIR, returns permanent local URL."""
+    resp = httpx.get(url, timeout=15)
+    resp.raise_for_status()
+    return _store_bytes(resp.content, filename)
+
+
+def _is_carimages_placeholder(content: bytes) -> bool:
+    """carimagesapi's generic 'covered car' image (returned when it has no real photo)."""
+    return (len(content) < _CARIMAGES_MIN_BYTES
+            or hashlib.md5(content).hexdigest() in _PLACEHOLDER_MD5)
+
+
+def is_stored_placeholder(image_url: str) -> bool:
+    """True if an already-stored local image is the carimagesapi placeholder — heals bad
+    images saved before placeholder detection was fixed. Matches the exact placeholder md5
+    only (NOT the size heuristic, so genuine small icar images are not flagged)."""
+    base = os.environ.get("IMAGES_BASE_URL", "https://images.gsmdev.co.il/car-images")
+    if not image_url or not image_url.startswith(base):
+        return False
+    path = os.path.join(os.environ.get("IMAGES_DIR", "/var/www/car-images"),
+                        image_url.rsplit("/", 1)[-1])
+    try:
+        with open(path, "rb") as f:
+            return hashlib.md5(f.read()).hexdigest() in _PLACEHOLDER_MD5
+    except OSError:
+        return False
+
+
 def get_image_carimagesapi(mfr_en: str, name_en: str) -> str:
-    """Fallback: carimagesapi.com — downloads image locally, returns permanent URL."""
-    import os
+    """Primary image: carimagesapi.com. Returns a permanent local URL, or '' when
+    carimagesapi has NO real image for the model (serves a placeholder) — in which case
+    the caller should fall back to icar's image."""
     api_key    = os.environ.get("CARIMAGES_API_KEY")
     api_secret = os.environ.get("CARIMAGES_API_SECRET")
     if not api_key or not api_secret:
@@ -144,22 +178,50 @@ def get_image_carimagesapi(mfr_en: str, name_en: str) -> str:
         if not signed_url:
             return ""
 
-        # Detect placeholder ("covered car") before downloading
-        head = httpx.head(signed_url, timeout=8, follow_redirects=True)
-        etag = head.headers.get("etag", "")
-        size = int(head.headers.get("content-length", 0))
-        if etag == '"69b15582-1ad3c"' or (0 < size < 120_000):
-            log.warning(f"  [carimagesapi] placeholder detected for {name_en} — מדלג")
+        # HEAD is unsupported by the CDN (always 404) — download and inspect the actual
+        # bytes to tell a real render from the 'covered car' placeholder.
+        img = httpx.get(signed_url, timeout=20, follow_redirects=True)
+        if img.status_code != 200 or "image" not in img.headers.get("content-type", ""):
+            log.info(f"  [carimagesapi] {name_en}: {img.status_code} — אין תמונה")
+            return ""
+        if _is_carimages_placeholder(img.content):
+            log.warning(f"  [carimagesapi] placeholder ({len(img.content)}B) — אין תמונה אמיתית ל-{name_en}")
             return ""
 
         slug     = re.sub(r"[^a-z0-9]+", "-", f"{mfr_en}-{model_name}".lower()).strip("-")
         filename = f"{slug}.png"
-        local_url = _download_and_store(signed_url, filename)
+        local_url = _store_bytes(img.content, filename)
         log.info(f"  [carimagesapi] ✓ {name_en} → {filename}")
         return local_url
 
     except Exception as e:
         log.warning(f"  [carimagesapi] error for {name_en}: {e}")
+        return ""
+
+
+def get_image_icar(mfr_en: str, name_en: str, icar_url: str) -> str:
+    """Fallback image: icar's bgremoval model image. Used only when carimagesapi has no
+    real image. Downloads + stores locally for a permanent URL. '' if unavailable."""
+    if not icar_url:
+        return ""
+    try:
+        r = httpx.get(icar_url, timeout=15, follow_redirects=True,
+                      headers={"User-Agent": _BROWSER_HEADERS["User-Agent"],
+                               "Referer": "https://www.icar.co.il/"})
+        if r.status_code != 200 or "image" not in r.headers.get("content-type", ""):
+            log.info(f"  [icar-img] {name_en}: {r.status_code} — אין תמונה ב-icar")
+            return ""
+        fname = (icar_url.split("?")[0].split("/")[-1]).lower()
+        if any(s in fname for s in _BAD_FNAMES):
+            return ""
+        ext  = os.path.splitext(fname)[1].lower()
+        ext  = ext if ext in (".jpg", ".jpeg", ".png", ".webp") else ".jpg"
+        slug = re.sub(r"[^a-z0-9]+", "-", f"{mfr_en}-{name_en}".lower()).strip("-")
+        local_url = _store_bytes(r.content, f"{slug}-icar{ext}")
+        log.info(f"  [icar-img] ✓ {name_en} → {slug}-icar{ext}")
+        return local_url
+    except Exception as e:
+        log.warning(f"  [icar-img] error for {name_en}: {e}")
         return ""
 
 

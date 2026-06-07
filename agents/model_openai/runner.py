@@ -9,7 +9,7 @@ import logging
 from .utils import CAR_TYPES, get_client, validate_record, strip_manufacturer_prefix
 from .icar import get_israel_models, _he_prefix_match
 from .details import get_details
-from .images import get_image_carimagesapi
+from .images import get_image_carimagesapi, get_image_icar, is_stored_placeholder
 
 log = logging.getLogger(__name__)
 
@@ -306,7 +306,12 @@ def run(payload) -> dict:
         if issues:
             log.warning(f"  ⚠ {name_en} ולידציה: {issues}")
 
+        # primary: carimagesapi; fall back to icar's image ONLY when carimagesapi has no
+        # real image (returns '' for its placeholder).
         image_url = get_image_carimagesapi(mfr_en, name_en)
+        if not image_url and nm.get("image_url"):
+            log.info(f"  [image] {label}: אין תמונה אמיתית ב-carimagesapi — נופל ל-icar")
+            image_url = get_image_icar(mfr_en, name_en, nm["image_url"])
         record["Model_Image_URL"] = image_url
         log.info(f"  תמונה: {image_url or '(לא נמצאה)'}")
         log.info(f"  קטגוריות: {record.get('Category', [])}")
@@ -378,6 +383,16 @@ def run(payload) -> dict:
             log.error(f"  ❌ deactivate {name}: {e}")
 
     # ── image updates for existing models ─────────────────────
+    # icar image per model name (for the carimagesapi → icar fallback)
+    icar_img_by_name: dict[str, str] = {}
+    for im in israel_models:
+        img = im.get("image_url")
+        if not img:
+            continue
+        for key in (im.get("name_en", ""), im.get("name_he", "")):
+            if key:
+                icar_img_by_name.setdefault(key.strip().upper(), img)
+
     for m in existing:
         name    = m.get("Name", "")
         name_he = m.get("Car_Model_Name_HE", "")
@@ -387,10 +402,18 @@ def run(payload) -> dict:
         current = m.get("Model_Image_URL", "")
 
         if (current or "").startswith("https://images.gsmdev.co.il/car-images/"):
-            log.info(f"  [image-fix] ⏭  {name} — תמונה קיימת על השרת, מדלג")
-            continue
+            if not is_stored_placeholder(current):
+                log.info(f"  [image-fix] ⏭  {name} — תמונה קיימת על השרת, מדלג")
+                continue
+            log.info(f"  [image-fix] 🩹 {name} — התמונה השמורה היא placeholder ישן, מרענן")
         log.info(f"  [image-fix] 🔍 {name} — מחפש ב-carimagesapi...")
         new_img = get_image_carimagesapi(mfr_en, name)
+        if not new_img:
+            icar_url = (icar_img_by_name.get(name.strip().upper())
+                        or icar_img_by_name.get((name_he or "").strip().upper()))
+            if icar_url:
+                log.info(f"  [image-fix] אין ב-carimagesapi — נופל ל-icar")
+                new_img = get_image_icar(mfr_en, name, icar_url)
         if new_img:
             try:
                 update_model(mid, {"Model_Image_URL": new_img})
